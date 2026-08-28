@@ -50,56 +50,49 @@ _MODEL_PRICING_MAP = {
 }
 _MODEL_PRICING_ORDER = sorted(_MODEL_PRICING_MAP, key=len, reverse=True)
 
+# ---- 用户可覆盖的定价与峰谷窗口（由设置界面写入 config，运行时 set_overrides 载入）----
+_OVERRIDE_PRICING: dict | None = None    # {模型前缀: {"peak": {...}, "off": {...}}}
+_OVERRIDE_PEAK_HOURS: list | None = None  # [[起, 止], ...]（UTC 小时）
 
-def _is_peak_now(when=None) -> bool:
-    """官方高峰时段判断（UTC）：周一~周五 01:00-04:00、06:00-10:00；周末/其余为低谷。
 
-    `when` 可注入 datetime 用于测试；默认取当前 UTC 时间。
+def set_overrides(pricing: dict | None = None, peak_hours=None) -> None:
+    """从配置加载覆盖：
+    pricing = {模型前缀: {"peak": {"input":..,"cacheRead":..,"output":..}, "off": {...}}}，
+    未填的字段自动沿用内置价（支持局部覆盖）；peak_hours = [[start, end], ...]（UTC 小时），
+    None/空 表示内置官方窗口（周一~五 01-04、06-10 UTC）。
     """
-    when = when or datetime.now(timezone.utc)
-    if when.weekday() >= 5:  # 周六/周日 → 低谷
-        return False
-    minutes = when.hour * 60 + when.minute
-    return (60 <= minutes < 240) or (360 <= minutes < 600)
+    global _OVERRIDE_PRICING, _OVERRIDE_PEAK_HOURS
+    if isinstance(pricing, dict) and pricing:
+        clean = {}
+        for prefix, pair in pricing.items():
+            if not isinstance(pair, dict):
+                continue
+            peak = pair.get("peak") if isinstance(pair.get("peak"), dict) else {}
+            off = pair.get("off") if isinstance(pair.get("off"), dict) else {}
+            clean[str(prefix).strip().lower()] = {
+                "peak": {k: v for k, v in peak.items() if isinstance(v, (int, float))},
+                "off": {k: v for k, v in off.items() if isinstance(v, (int, float))},
+            }
+        _OVERRIDE_PRICING = clean or None
+    else:
+        _OVERRIDE_PRICING = None
+    if isinstance(peak_hours, list) and peak_hours:
+        windows = []
+        for seg in peak_hours:
+            if isinstance(seg, (list, tuple)) and len(seg) == 2:
+                try:
+                    s, e = int(seg[0]), int(seg[1])
+                    if 0 <= s < e <= 24:
+                        windows.append((s, e))
+                except (TypeError, ValueError):
+                    continue
+        _OVERRIDE_PEAK_HOURS = windows or None
+    else:
+        _OVERRIDE_PEAK_HOURS = None
 
 
-def is_peak_ts(ms) -> bool:
-    """毫秒时间戳（DSH 会话事件顶层 `time`）→ 是否高峰时段。"""
-    try:
-        when = datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc)
-    except (TypeError, ValueError, OverflowError, OSError):
-        return False
-    return _is_peak_now(when)
-
-
-def pricing_for_model(model: str | None, when=None) -> dict:
-    """按模型名选定价；官方两档价模型按当前时间自动切高峰/低谷，其余回落默认档。
-
-    `when` 可注入 datetime 用于测试；默认取当前 UTC 时间判断高峰。
-    """
-    if not model:
-        return dict(PRICING_DEFAULT)
-    low = str(model).lower()
-    key = "default"
-    for prefix in _MODEL_PRICING_ORDER:
-        if low.startswith(prefix):
-            key = _MODEL_PRICING_MAP[prefix]
-            break
-    if key == "flash":
-        return dict(PRICING_FLASH_PEAK if _is_peak_now(when) else PRICING_FLASH_OFF_PEAK)
-    if key == "pro":
-        return dict(PRICING_PRO_PEAK if _is_peak_now(when) else PRICING_PRO_OFF_PEAK)
-    if key == "reasoner":
-        return dict(PRICING_REASONER)
-    return dict(PRICING_DEFAULT)
-
-
-def pricing_both_for_model(model: str | None) -> tuple[dict, dict]:
-    """返回该模型 (高峰价, 低谷价) 两套定价，供"双账本"同时估算。
-
-    官方有两档价的模型（v4-flash / v4-pro / vision-exp）返回各自峰/谷价；
-    无两档价的模型（reasoner/chat/未知）两套相同，显示时归并为单值。
-    """
+def pricing_both_builtin(model: str | None) -> tuple[dict, dict]:
+    """内置定价表（不含用户覆盖）。"""
     if not model:
         return dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
     low = str(model).lower()
@@ -115,6 +108,67 @@ def pricing_both_for_model(model: str | None) -> tuple[dict, dict]:
     if key == "reasoner":
         return dict(PRICING_REASONER), dict(PRICING_REASONER)
     return dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
+
+
+def _override_pair_for(model: str | None) -> tuple[dict, dict] | None:
+    """按最长前缀命中用户覆盖表；返回 (peak, off)，未填字段沿用内置价。"""
+    if not model or not _OVERRIDE_PRICING:
+        return None
+    low = str(model).lower()
+    for prefix in sorted(_OVERRIDE_PRICING, key=len, reverse=True):
+        if not low.startswith(prefix):
+            continue
+        base_peak, base_off = pricing_both_builtin(low)
+        pair = _OVERRIDE_PRICING[prefix]
+        return {**base_peak, **pair.get("peak", {})}, {**base_off, **pair.get("off", {})}
+    return None
+
+
+def _is_peak_now(when=None) -> bool:
+    """高峰时段判断（UTC）：默认内置官方窗口（周一~五 01:00-04:00、06:00-10:00）；
+    设置了用户覆盖窗口时按覆盖判断；周末/其余为低谷。
+
+    `when` 可注入 datetime 用于测试；默认取当前 UTC 时间。
+    """
+    when = when or datetime.now(timezone.utc)
+    if when.weekday() >= 5:  # 周六/周日 → 低谷
+        return False
+    minutes = when.hour * 60 + when.minute
+    if _OVERRIDE_PEAK_HOURS:
+        return any(s * 60 <= minutes < e * 60 for s, e in _OVERRIDE_PEAK_HOURS)
+    return (60 <= minutes < 240) or (360 <= minutes < 600)
+
+
+def is_peak_ts(ms) -> bool:
+    """毫秒时间戳（DSH 会话事件顶层 `time`）→ 是否高峰时段。"""
+    try:
+        when = datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+    return _is_peak_now(when)
+
+
+def pricing_for_model(model: str | None, when=None) -> dict:
+    """按模型名选定价（含用户覆盖）；两档模型按当前时间切高峰/低谷。
+
+    `when` 可注入 datetime 用于测试；默认取当前 UTC 时间判断高峰。
+    """
+    peak, off = pricing_both_for_model(model)
+    return dict(peak if _is_peak_now(when) else off)
+
+
+def pricing_both_for_model(model: str | None) -> tuple[dict, dict]:
+    """返回该模型 (高峰价, 低谷价)（优先用户覆盖，其次内置表）。
+
+    官方有两档价的模型（v4-flash / v4-pro / vision-exp）返回各自峰/谷价；
+    无两档价的模型（reasoner/chat/未知）两套相同，显示时归并为单值。
+    """
+    if not model:
+        return dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
+    ov = _override_pair_for(model)
+    if ov is not None:
+        return ov
+    return pricing_both_builtin(model)
 
 
 def estimate_cost_cny(input_t: int, output_t: int, cache_read: int = 0,

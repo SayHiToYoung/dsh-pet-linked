@@ -294,6 +294,8 @@ class Config:
             "chat_bg_crops": {},    # 每个背景的用户自定义取景框 {背景标识: [x,y,w,h] 归一化}
             "chat_ui_style": "modern",  # modern / classic（仅聊天窗口保留双实现）
             "chat": _default_chat_data(),
+            "token_pricing": {},       # 用户覆盖价格表：{模型前缀: {"peak": {...}, "off": {...}}}（USD/百万）
+            "token_peak_hours": [],    # 用户覆盖高峰窗口：[[起, 止], ...]（UTC 小时）；空=官方窗口
         }
         self._load()
         self._normalize_pet_settings()
@@ -366,6 +368,7 @@ class Config:
             "chat_bg_crops",
             "chat_ui_style",
             "token_display_fields", "token_display_scopes", "token_display_format",
+            "token_pricing", "token_peak_hours",
         ):
             if key in raw and raw[key] is not None:
                 self.data[key] = raw[key]

@@ -258,6 +258,11 @@ class PetWindow(QWidget):
         self.token_lifetime_off: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
         self.token_model: str = ""
         self._ledger_session: str = ""
+        # 装载用户覆盖的价格表与高峰窗口（设置窗口保存后在运行时也会更新）
+        token_cost_mod.set_overrides(
+            self.cfg.get("token_pricing") or {},
+            self.cfg.get("token_peak_hours") or None,
+        )
         self._load_ledger_state()
 
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
