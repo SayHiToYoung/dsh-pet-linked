@@ -80,7 +80,7 @@ class _WorkStateBridge(QObject):
     """把后台线程（信标 HTTP / 会话日志轮询）的结果安全投递到 Qt 主线程。"""
 
     changed = Signal(bool, str)
-    ledger_changed = Signal(str, object, str)
+    ledger_changed = Signal(str, object, object, str)
 
     def __init__(self, controller) -> None:
         super().__init__()
@@ -96,11 +96,11 @@ class _WorkStateBridge(QObject):
             except Exception:
                 logging.exception("work_state 应用失败")
 
-    def _apply_ledger(self, session_id: str, totals: dict, model: str) -> None:
+    def _apply_ledger(self, session_id: str, current_totals: dict, total_totals: dict, model: str) -> None:
         win = self.controller.win
         if win is not None:
             try:
-                win.update_ledger(session_id, totals, model)
+                win.update_ledger(session_id, current_totals, total_totals, model)
             except Exception:
                 logging.exception("token ledger 应用失败")
 
@@ -228,11 +228,14 @@ class PetApp:
 
     def _ledger_worker(self) -> None:
         try:
+            # 累计 = 所有工作区全部会话总账；本会话 = 当前工作区最新会话
+            total_totals = session_reader.aggregate_all_sessions()
             session_file = session_reader.find_current_session_file()
             if session_file is None:
-                return
-            sid, totals, model = session_reader.read_session_usage(session_file)
-            self._work_bridge.ledger_changed.emit(sid, totals, model)
+                sid, current_totals, model = "", {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}, ""
+            else:
+                sid, current_totals, model = session_reader.read_session_usage(session_file)
+            self._work_bridge.ledger_changed.emit(sid, current_totals, total_totals, model)
         except Exception:
             logging.exception("会话日志账本解析失败")
         finally:

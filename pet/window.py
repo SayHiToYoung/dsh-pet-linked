@@ -247,13 +247,12 @@ class PetWindow(QWidget):
         self.work_detail: str = ""
 
         # ---- Token 花费统计（二次开发新增，DSH 会话日志驱动）----
-        # token_session = 当前会话总数（每轮从会话日志解析）；token_lifetime = 跨重启累计
+        # token_session = 当前工作区最新会话总数；token_lifetime = 所有工作区总账
         # token_model = 会话日志里的模型名
         self.token_session: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
         self.token_lifetime: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
         self.token_model: str = ""
         self._ledger_session: str = ""
-        self._ledger_sessions: dict = {}
         self._load_ledger_state()
 
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
@@ -861,7 +860,7 @@ class PetWindow(QWidget):
         return {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
 
     def _load_ledger_state(self) -> None:
-        """读取账本状态：{lifetime, sessions{<sid>: totals}, currentSession}。"""
+        """读取账本快照（仅启动时预热显示；轮询会立即用实时数据覆盖）。"""
         path = self._token_usage_path()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -870,12 +869,6 @@ class PetWindow(QWidget):
                 if isinstance(lt, dict):
                     self.token_lifetime = {
                         k: int(lt.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
-                    }
-                sessions = data.get("sessions")
-                if isinstance(sessions, dict):
-                    self._ledger_sessions = {
-                        str(sid): {k: int(t.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")}
-                        for sid, t in sessions.items() if isinstance(t, dict)
                     }
                 self._ledger_session = str(data.get("currentSession") or "")
                 return
@@ -899,34 +892,27 @@ class PetWindow(QWidget):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
                 "lifetime": self.token_lifetime,
-                "sessions": self._ledger_sessions,
                 "currentSession": self._ledger_session,
+                "currentSessionTotals": self.token_session,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
 
-    def update_ledger(self, session_id: str, totals: dict, model: str = "") -> None:
-        """由会话日志读取驱动：本会话取总数，累计按增量累加（跨重启不重复计）。"""
-        session_id = str(session_id or "")
-        if not session_id or not isinstance(totals, dict):
+    def update_ledger(self, session_id: str, current_totals: dict, total_totals: dict, model: str = "") -> None:
+        """由会话日志读取驱动：
+        本会话 = 当前工作区最新会话的总数；累计 = 所有工作区全部会话的总账。
+        """
+        if not isinstance(current_totals, dict) or not isinstance(total_totals, dict):
             return
         if model:
             self.token_model = str(model)[:120]
-        # 本会话展示 = 当前会话日志解析出的总数（权威）
         self.token_session = {
-            k: int(totals.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
+            k: int(current_totals.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
         }
-        self._ledger_session = session_id
-        # 累计：相对上次记录的该会话总数取增量
-        prev = self._ledger_sessions.get(session_id, self._empty_tokens())
-        for k in ("input", "output", "cacheRead", "reasoning"):
-            cur = int(totals.get(k, 0) or 0)
-            delta = cur - int(prev.get(k, 0) or 0)
-            if delta > 0:
-                self.token_lifetime[k] += delta
-        self._ledger_sessions[session_id] = {
-            k: int(totals.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
+        self.token_lifetime = {
+            k: int(total_totals.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
         }
+        self._ledger_session = str(session_id or "")
         self._save_ledger_state()
 
     def add_token_usage(self, added: dict) -> None:

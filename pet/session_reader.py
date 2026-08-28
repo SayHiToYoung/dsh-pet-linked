@@ -138,3 +138,40 @@ def read_session_usage(path: Path) -> tuple[str, dict, str]:
         if isinstance(msg, dict) and msg.get("source") and msg["source"].get("model"):
             model = str(msg["source"]["model"])[:120]
     return sid, totals, model
+
+
+# 全量聚合缓存：path -> ((mtime,size), totals)；文件没变就不重解析
+_AGG_CACHE: dict = {}
+
+
+def aggregate_all_sessions(root: Path | None = None) -> dict:
+    """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。"""
+    base = root or sessions_root()
+    grand = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    if not base.is_dir():
+        return grand
+    try:
+        for ws in base.iterdir():
+            if not ws.is_dir():
+                continue
+            for sess in ws.iterdir():
+                f = sess / "session.jsonl.zstd"
+                if not f.is_file():
+                    continue
+                try:
+                    st = f.stat()
+                    stamp = (st.st_mtime, st.st_size)
+                except OSError:
+                    continue
+                key = str(f)
+                cached = _AGG_CACHE.get(key)
+                if cached is not None and cached[0] == stamp:
+                    tot = cached[1]
+                else:
+                    _, tot, _ = read_session_usage(f)
+                    _AGG_CACHE[key] = (stamp, tot)
+                for k in grand:
+                    grand[k] += tot[k]
+    except OSError:
+        pass
+    return grand
