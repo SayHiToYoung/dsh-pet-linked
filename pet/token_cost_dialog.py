@@ -113,6 +113,11 @@ class TokenCostDialog(QDialog):
         hint.setWordWrap(True)
         root.addWidget(hint)
 
+        # 匹配诊断：当前会话模型 → 命中的价格档
+        self._match_label = QLabel("")
+        self._match_label.setWordWrap(True)
+        root.addWidget(self._match_label)
+
         # 显示字段
         fields_box = QGroupBox("显示数据")
         fields_layout = QVBoxLayout(fields_box)
@@ -265,6 +270,31 @@ class TokenCostDialog(QDialog):
             names = []
         self._model_ref.clear()
         self._model_ref.addItems(names or ["（尚未扫描到会话记录）"])
+
+        # 匹配诊断：当前会话实际模型 → 命中的价格档（可验证自定义价格是否生效）
+        try:
+            cur_file = session_reader.find_current_session_file()
+            cur_model = ""
+            if cur_file is not None:
+                _, _, cur_model, _, _ = session_reader.read_session_usage(cur_file)
+            if cur_model:
+                desc, peak_p, off_p = token_cost_mod.pricing_match_info(cur_model)
+                if peak_p == off_p:
+                    text = f"当前模型 {cur_model} → {desc}（单档 输入 ${peak_p.get('input', 0):g}）"
+                else:
+                    text = (f"当前模型 {cur_model} → {desc}"
+                            f"（输入 峰${peak_p.get('input', 0):g}/谷${off_p.get('input', 0):g}）")
+                self._match_label.setText(text)
+                self._match_label.setStyleSheet(
+                    "color: #c0392b; font-weight: bold;" if desc.startswith("未命中")
+                    else "color: #27ae60;"
+                )
+            else:
+                self._match_label.setText("（暂无当前会话模型信息）")
+                self._match_label.setStyleSheet("color: #7f8c8d;")
+        except Exception:
+            self._match_label.setText("（匹配诊断不可用）")
+            self._match_label.setStyleSheet("color: #7f8c8d;")
 
     def _fill_price_row(self, row: int, prefix: str, overrides: dict) -> None:
         """把一个模型行填上当前生效价（覆盖合并内置）。"""

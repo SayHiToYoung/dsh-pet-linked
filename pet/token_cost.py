@@ -171,6 +171,36 @@ def pricing_both_for_model(model: str | None) -> tuple[dict, dict]:
     return pricing_both_builtin(model)
 
 
+def pricing_match_info(model: str | None) -> tuple[str, dict, dict]:
+    """返回 (匹配说明, 高峰价, 低谷价)，供设置界面做匹配诊断。
+
+    说明示例：
+      "用户覆盖：kimi-k3"   —— 命中了你在设置里添加/修改的前缀
+      "内置档：v4-flash"    —— 命中内置价格表
+      "未命中：按默认档估算" —— 模型名没匹配到任何价格表，价格可能不准，建议添加
+    """
+    if not model:
+        return "（无模型名）", dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
+    low = str(model).lower()
+    if _OVERRIDE_PRICING:
+        for prefix in sorted(_OVERRIDE_PRICING, key=len, reverse=True):
+            if low.startswith(prefix):
+                peak, off = _override_pair_for(model) or (dict(), dict())
+                return f"用户覆盖：{prefix}", peak, off
+    key = "default"
+    for prefix in _MODEL_PRICING_ORDER:
+        if low.startswith(prefix):
+            key = _MODEL_PRICING_MAP[prefix]
+            break
+    if key == "flash":
+        return "内置档：v4-flash", dict(PRICING_FLASH_PEAK), dict(PRICING_FLASH_OFF_PEAK)
+    if key == "pro":
+        return "内置档：v4-pro", dict(PRICING_PRO_PEAK), dict(PRICING_PRO_OFF_PEAK)
+    if key == "reasoner":
+        return "内置档：deepseek-reasoner", dict(PRICING_REASONER), dict(PRICING_REASONER)
+    return "未命中：按默认档估算", dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
+
+
 def estimate_cost_cny(input_t: int, output_t: int, cache_read: int = 0,
                       reasoning: int = 0, pricing: dict | None = None) -> float:
     """估算花费（人民币）。input 已含缓存未命中部分，缓存命中单独计便宜档。"""
