@@ -41,6 +41,7 @@ PetWindow.update_ledger()
 | `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡；`open_token_cost_settings` |
 | `pet/app.py` | 拉起 WorkStateServer；`_WorkStateBridge` 投递；每 5 秒轮询会话日志（当前会话 + 全工作区总账）；`_set_app_icon` 鲸鱼 Dock 图标；托盘「Token 花费统计/设置」 |
 | `pet/context_menus/modern.py` `legacy.py` | 右键菜单「Token 花费统计」「Token 花费设置」入口 |
+| `pet/emotion_actor.py` | **新增**：情绪→动作混合引擎（本地关键词 + LLM 升级导演） |
 | `beacon/dsh-work-beacon.js` | **新增**：页内信标（仅工作状态检测，URL 带内容哈希防缓存） |
 | `scripts/inject-beacon.mjs` | **新增**：注入/回滚信标到 DSH 前端（SHA-256 备份） |
 | `scripts/make-app.sh` | **新增**：一键生成「联动桌宠.app」访达/Dock 启动器 |
@@ -80,8 +81,19 @@ curl -s http://127.0.0.1:47890/health         # 健康检查
   node scripts/inject-beacon.mjs --rollback <backup目录>
   # backup 在 .beacon-backup/dsh-work-beacon-<时间戳>/
   ```
-- **还原桌宠代码**：`git checkout -- pet/ && rm pet/work_state.py pet/token_cost.py pet/token_cost_dialog.py pet/session_reader.py`
+- **还原桌宠代码**：`git checkout -- pet/ && rm pet/work_state.py pet/token_cost.py pet/token_cost_dialog.py pet/session_reader.py pet/emotion_actor.py`
 - 旧的官方 `.app` 版桌宠未受影响，可随时启动（只是没有联动）
+
+## 情绪响应（混合引擎）
+
+桌宠空闲时（DSH 没在跑任务），检测到**新回合的对话文本**后判断情绪，播放贴合场景的动作：
+
+- **本地关键词情感**（零成本）：开心/庆祝/困/饿/思考/玩耍等 → 直接映射现有动画；
+- **LLM 升级**：置信度低 或 情绪强烈（生气/难过/惊讶/喜欢/激动）时，调 DeepSeek 小模型
+  从动作标签表里选最贴合的一个（结构化 JSON，花少量 token）；
+- 仅**空闲时**响应（工作态不打断），**15 秒节流**，可在 config.json 关掉（`emotion_reactions_enabled`）。
+- 相关文件：`pet/emotion_actor.py`（本地规则 + LLM 导演 + 动作映射）、
+  `session_reader.latest_assistant_message`、`window.react_to_emotion`、`app` 情绪监听。
 
 ## 说明
 
