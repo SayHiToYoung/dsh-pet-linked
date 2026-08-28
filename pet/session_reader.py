@@ -16,6 +16,8 @@ import re
 import zstandard
 from pathlib import Path
 
+from . import token_cost as token_cost_mod
+
 DEFAULT_SESSIONS_ROOT = Path.home() / ".dsh" / "sessions"
 
 # 一个回合的 usage 形状（同 DSH mapUsage）
@@ -117,19 +119,23 @@ def _decompress_all_fallback(data: bytes) -> str:
     return b"".join(out_chunks).decode("utf-8", "replace")
 
 
-def read_session_usage(path: Path) -> tuple[str, dict, str]:
-    """解析一个会话日志，返回 (session_id, totals, model)。
+def read_session_usage(path: Path) -> tuple[str, dict, str, dict, dict]:
+    """解析一个会话日志，返回 (session_id, totals, model, peak_totals, off_totals)。
 
-    totals = {"input","output","cacheRead","reasoning"}（按 (turn,step) 去重求和）。
-    model 取日志里最后出现的模型名。
+    totals 为全部 token；peak_totals / off_totals 按每个事件的时间戳
+    （事件顶层 `time`，毫秒）划分高峰/低谷时段分别累计，供"真实花费"
+    按各时段价估算后求和（token_cost.estimate_cost_cny_mixed）。
+    按 (turn, step) 去重求和。
     """
     sid = _session_id_of(path)
     totals = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    peak_totals = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    off_totals = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
     model = ""
     try:
         raw = path.read_bytes()
     except OSError:
-        return sid, totals, model
+        return sid, totals, model, peak_totals, off_totals
     text = _decompress_all(raw)
     seen: set[tuple] = set()
     for line in text.splitlines():
@@ -151,14 +157,16 @@ def read_session_usage(path: Path) -> tuple[str, dict, str]:
         if key in seen:
             continue
         seen.add(key)
-        totals["input"] += int(usage.get("inputTokens") or 0)
-        totals["output"] += int(usage.get("outputTokens") or 0)
-        totals["cacheRead"] += int(usage.get("cacheReadTokens") or 0)
-        totals["reasoning"] += int(usage.get("reasoningTokens") or 0)
+        bucket = peak_totals if token_cost_mod.is_peak_ts(ev.get("time")) else off_totals
+        for k, usage_key in (("input", "inputTokens"), ("output", "outputTokens"),
+                             ("cacheRead", "cacheReadTokens"), ("reasoning", "reasoningTokens")):
+            n = int(usage.get(usage_key) or 0)
+            totals[k] += n
+            bucket[k] += n
         msg = data.get("message")
         if isinstance(msg, dict) and msg.get("source") and msg["source"].get("model"):
             model = str(msg["source"]["model"])[:120]
-    return sid, totals, model
+    return sid, totals, model, peak_totals, off_totals
 
 
 # 全量聚合缓存：path -> ((mtime,size), totals)；文件没变就不重解析
@@ -316,12 +324,17 @@ def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]
     return best[1], best[2], best[3]
 
 
-def aggregate_all_sessions(root: Path | None = None) -> dict:
-    """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。"""
+def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict, dict]:
+    """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。
+
+    返回 (grand, grand_peak, grand_off)：总账 + 高峰分桶 + 低谷分桶。
+    """
     base = root or sessions_root()
     grand = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    grand_peak = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    grand_off = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
     if not base.is_dir():
-        return grand
+        return grand, grand_peak, grand_off
     try:
         for ws in base.iterdir():
             if not ws.is_dir():
@@ -338,12 +351,14 @@ def aggregate_all_sessions(root: Path | None = None) -> dict:
                 key = str(f)
                 cached = _AGG_CACHE.get(key)
                 if cached is not None and cached[0] == stamp:
-                    tot = cached[1]
+                    tot, peak, off = cached[1]
                 else:
-                    _, tot, _ = read_session_usage(f)
-                    _AGG_CACHE[key] = (stamp, tot)
+                    _, tot, _, peak, off = read_session_usage(f)
+                    _AGG_CACHE[key] = (stamp, (tot, peak, off))
                 for k in grand:
                     grand[k] += tot[k]
+                    grand_peak[k] += peak[k]
+                    grand_off[k] += off[k]
     except OSError:
         pass
-    return grand
+    return grand, grand_peak, grand_off

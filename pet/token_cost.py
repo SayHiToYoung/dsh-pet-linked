@@ -63,6 +63,15 @@ def _is_peak_now(when=None) -> bool:
     return (60 <= minutes < 240) or (360 <= minutes < 600)
 
 
+def is_peak_ts(ms) -> bool:
+    """毫秒时间戳（DSH 会话事件顶层 `time`）→ 是否高峰时段。"""
+    try:
+        when = datetime.fromtimestamp(float(ms) / 1000.0, tz=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+    return _is_peak_now(when)
+
+
 def pricing_for_model(model: str | None, when=None) -> dict:
     """按模型名选定价；官方两档价模型按当前时间自动切高峰/低谷，其余回落默认档。
 
@@ -118,6 +127,24 @@ def estimate_cost_cny(input_t: int, output_t: int, cache_read: int = 0,
         + max(0, int(output_t or 0)) * float(p.get("output", 0))
     ) / 1_000_000.0
     return round(usd * EXCHANGE_RATE, 4)
+
+
+def estimate_cost_cny_mixed(peak_totals: dict, off_totals: dict,
+                            peak_pricing: dict | None = None,
+                            off_pricing: dict | None = None) -> float:
+    """峰谷分桶混合估算：高峰用量×高峰价 + 低谷用量×低谷价 = 真实花费（人民币）。
+
+    peak_totals / off_totals 为 {input, output, cacheRead, reasoning} 分桶；
+    无两档价的模型传同一套 pricing 即可，结果退化为单档估算。
+    """
+    pp = peak_pricing or PRICING_DEFAULT
+    op = off_pricing or PRICING_DEFAULT
+    return (estimate_cost_cny(
+                peak_totals.get("input", 0), peak_totals.get("output", 0),
+                peak_totals.get("cacheRead", 0), peak_totals.get("reasoning", 0), pp)
+            + estimate_cost_cny(
+                off_totals.get("input", 0), off_totals.get("output", 0),
+                off_totals.get("cacheRead", 0), off_totals.get("reasoning", 0), op))
 
 
 def format_number(n, style: str = "auto") -> str:
