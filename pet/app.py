@@ -229,7 +229,7 @@ class PetApp:
         if self._ledger_timer is not None:
             return
         timer = QTimer()
-        timer.setInterval(5000)
+        timer.setInterval(2000)  # 2 秒：用户消息即时落盘，缩短情绪反应延迟（原 5 秒）
         timer.timeout.connect(self._poll_ledger)
         self._ledger_timer = timer
         timer.start()

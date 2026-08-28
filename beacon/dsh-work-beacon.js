@@ -78,6 +78,7 @@
       diag: { framesSeen: DIAG.framesSeen, usageSeen: DIAG.usageSeen,
               usagePosted: DIAG.usagePosted, postFailures: DIAG.postFailures,
               lastUsageAt: DIAG.lastUsageAt,
+              userMsgSeen: DIAG.userMsgSeen, emotePosted: DIAG.emotePosted,
               pending: usagePending.input + usagePending.output + usagePending.cacheRead + usagePending.reasoning }
     });
     try {
@@ -106,7 +107,8 @@
   var seenUsageKeys = {};      // "turn:step" 去重
   var seenUsageCount = 0;
   // 诊断计数
-  var DIAG = { framesSeen: 0, usageSeen: 0, usagePosted: 0, postFailures: 0, lastUsageAt: 0 };
+  var DIAG = { framesSeen: 0, usageSeen: 0, usagePosted: 0, postFailures: 0, lastUsageAt: 0,
+               userMsgSeen: 0, emotePosted: 0 };
 
   /** 从事件里取 {usage, model, turn, step}（assistant/message 与 assistant/chunk）。 */
   function extractUsageInfo(event) {
@@ -237,6 +239,7 @@
 
   /** 实时上报用户消息（你一发消息，桌宠立刻响应）。 */
   function postEmote(text) {
+    DIAG.emotePosted += 1;
     try {
       fetch(EMOTE_ENDPOINT, {
         method: "POST",
@@ -251,6 +254,7 @@
   function handleFrame(event) {
     // 实时用户消息：你按下发送 → 事件立刻到页面 → 立刻上报桌宠（不等会话日志）
     if (event && event.type === "user/message") {
+      DIAG.userMsgSeen += 1;
       var ut = extractUserText(event.data);
       if (ut) postEmote(ut);
     }
