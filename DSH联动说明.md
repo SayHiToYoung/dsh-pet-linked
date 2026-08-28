@@ -39,7 +39,7 @@ PetWindow.update_ledger()
 | `pet/token_cost.py` | **新增**：DeepSeek 定价表（v4-flash $0.15/$0.29/$0.02 等）+ 估算 + `format_number` 紧凑格式化（万/亿、K/M、完整三档） |
 | `pet/token_cost_dialog.py` | **新增**：Token 花费显示设置窗口（勾选字段/口径/格式，存 config.json） |
 | `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡；`open_token_cost_settings` |
-| `pet/app.py` | 拉起 WorkStateServer；`_WorkStateBridge` 投递；每 5 秒轮询会话日志（当前会话 + 全工作区总账）；`_set_app_icon` 鲸鱼 Dock 图标；托盘「Token 花费统计/设置」 |
+| `pet/app.py` | 拉起 WorkStateServer；`_WorkStateBridge` 投递；每 2 秒轮询会话日志（当前会话 + 全工作区总账）；情绪监听（一宠跟人走）；`_set_app_icon` 鲸鱼 Dock 图标；托盘「Token 花费统计/设置」 |
 | `pet/context_menus/modern.py` `legacy.py` | 右键菜单「Token 花费统计」「Token 花费设置」入口 |
 | `pet/emotion_actor.py` | **新增**：情绪→动作混合引擎（本地关键词 + LLM 升级导演） |
 | `beacon/dsh-work-beacon.js` | **新增**：页内信标（仅工作状态检测，URL 带内容哈希防缓存） |
@@ -84,23 +84,31 @@ curl -s http://127.0.0.1:47890/health         # 健康检查
 - **还原桌宠代码**：`git checkout -- pet/ && rm pet/work_state.py pet/token_cost.py pet/token_cost_dialog.py pet/session_reader.py pet/emotion_actor.py`
 - 旧的官方 `.app` 版桌宠未受影响，可随时启动（只是没有联动）
 
-## 情绪响应（混合引擎）
+## 情绪响应（混合引擎 + 一宠跟人走）
 
-桌宠空闲时（DSH 没在跑任务），检测到**新回合的对话文本**后判断情绪，播放贴合场景的动作：
+桌宠空闲时（DSH 没在跑工具），检测到**用户最新一条消息**（任何工作区/会话，跟着人走）后判断情绪，播放贴合场景的动作：
 
-- **本地关键词情感**（零成本）：开心/庆祝/困/饿/思考/玩耍等 → 直接映射现有动画；
+- **触发源**：全局扫描所有工作区的会话日志，取"最新一条用户文本消息"（`latest_user_message_global`），
+  用消息 time 字段跨会话比较；`current_sid` 追踪当前会话，用户切会话自动跟着切；
+- **本地关键词情感**（零成本）：开心/庆祝/困/饿/思考/玩耍/被逗(大肥鱼→傲娇)等 → 直接映射现有动画；
 - **LLM 升级**：置信度低 或 情绪强烈（生气/难过/惊讶/喜欢/激动）时，调 DeepSeek 小模型
   从动作标签表里选最贴合的一个（结构化 JSON，花少量 token）；
-- 仅**空闲时**响应（工作态不打断），**15 秒节流**，可在 config.json 关掉（`emotion_reactions_enabled`）。
+- **实时性**：会话日志每 **2 秒**轮询（用户消息即时落盘，反应延迟 ~1-2 秒）；
+- **去重**：指纹 = 会话ID+seq，`set` 集合去重（上限 500 自动裁剪），重启后也只反应一次；
+- **安全**：`sk-*` 密钥、长 token 串、系统注入（PERSONA_LOAD 等）自动过滤，不进情绪、不记日志；
+- 仅**空闲时**响应（工具在跑不打断），**15 秒节流**，可在 config.json 关掉（`emotion_reactions_enabled`）。
 - 相关文件：`pet/emotion_actor.py`（本地规则 + LLM 导演 + 动作映射）、
-  `session_reader.latest_assistant_message`、`window.react_to_emotion`、`app` 情绪监听。
+  `session_reader.latest_user_message_global`、`window.react_to_emotion`、`app` 情绪监听。
 
 ## 说明
 
 - **Token 账本直读 DSH 会话日志**（`~/.dsh/sessions/*/session-*/session.jsonl.zstd`，追加式 zstd 多帧，快速解压），
-  每 5 秒后台解析。**本会话 = 当前工作区最新会话**；**累计 = 所有工作区全部会话总账**（mtime+size 缓存，
+  每 2 秒后台解析。**本会话 = 当前工作区最新会话**；**累计 = 所有工作区全部会话总账**（mtime+size 缓存，
   增量几乎零开销）。跨重启幂等，断线可补账，**不依赖页面刷新/信标**。
-- 信标只负责**工作状态**联动：观察 `[data-state="ongoing"]` 等 DOM 信号；只**读**，不触碰业务逻辑；
+- **情绪响应与账本口径不同**：情绪响应 = "一宠跟人走"，全局跟随用户最新会话（跨工作区）；
+  token 累计 = 所有工作区总账（见上）。两者各司其职。
+- 信标只负责**工作状态**联动：只观察工具真的在跑的 DOM 信号（`[data-status="running"]` / `[data-running]` /
+  工具卡片 running）；**纯聊天不算工作**（`data-state="ongoing"` 只表示回合进行中）。只**读**，不触碰业务逻辑；
   桌宠没开时信标静默失败，不影响 DSH。所有流量本机回环（127.0.0.1），不对外。
 - usage 数据结构（来自 DSH `dsh-llm-deepseek` 的 `mapUsage`）：`{inputTokens, outputTokens, cacheReadTokens?, reasoningTokens?}`；模型名在 `assistant/message.message.source.model`。
 - **Token 花费是估算**：DeepSeek API 只返回 token 数、不返回金额，金额 = token × 单价（参考官方定价，汇率 7.2）不是账单；`deepseek-v4` 系列为峰谷计费，本估算按非高峰费率。定价可在 `pet/token_cost.py` 调整。
