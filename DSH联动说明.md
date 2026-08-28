@@ -37,7 +37,7 @@ PetWindow.update_ledger()
 | `pet/work_state.py` | **新增**：本地 HTTP 接收端（127.0.0.1:47890，工作状态 `/state`） |
 | `pet/session_reader.py` | **新增**：直读 DSH 会话日志（~/.dsh/sessions），逐回合解析 token 用量、模型名与**发生时间**（峰/谷分桶）；`aggregate_all_sessions` 全工作区汇总（含峰谷桶） |
 | `pet/token_cost.py` | **新增**：DeepSeek 定价表（官方 2026-08 最新价；`v4-pro`/`v4-flash`/`v4-flash-vision-exp` 峰谷两档）+ 时间戳判峰谷 + 峰谷分桶混合计价（高峰用量×高峰价 + 低谷用量×低谷价）+ `format_number` 紧凑格式化（万/亿、K/M、完整三档；auto 档粒度调细，价格 4 位小数） |
-| `pet/token_cost_dialog.py` | **新增**：Token 花费显示设置窗口（勾选字段/口径/格式 + **价格表可视化编辑**：各模型峰/谷单价 + 高峰时段，存 config.json 的 `token_pricing`/`token_peak_hours`） |
+| `pet/token_cost_dialog.py` | **新增**：Token 花费显示设置窗口（勾选字段/口径/格式 + **价格表可视化编辑**：各模型峰/谷单价、高峰时段，**支持「添加模型」自行引入新模型前缀**；存 config.json 的 `token_pricing`/`token_peak_hours`） |
 | `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡（价格 4 位小数）；`open_token_cost_settings` |
 | `pet/app.py` | 拉起 WorkStateServer；`_WorkStateBridge` 投递；每 2 秒轮询会话日志（当前会话 + 全工作区总账）；情绪监听（一宠跟人走）；`_set_app_icon` 鲸鱼 Dock 图标；托盘「Token 花费统计/设置」 |
 | `pet/context_menus/modern.py` `legacy.py` | 右键菜单「Token 花费统计」「Token 花费设置」入口 |
