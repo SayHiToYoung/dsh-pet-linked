@@ -180,6 +180,7 @@ class PetApp:
         self._last_react_ts: float = 0.0
         self._emotion_react_interval: float = 15.0
         self._seen_react_fps: set = set()
+        self._current_sid: str = ""
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -274,10 +275,15 @@ class PetApp:
             now = time.monotonic()
             if self._last_react_ts and (now - self._last_react_ts) < self._emotion_react_interval:
                 return
-            # 以全局最新一条用户消息触发情绪（跨会话稳定，避免多会话交替导致重复）
+            # 以全局最新一条用户消息为准；锁定"当前会话"，别的会话不干扰
             session_id, fingerprint, text = session_reader.latest_user_message_global()
             if not fingerprint or not text:
                 return
+            if session_id and session_id != self._current_sid:
+                # 用户切到了新会话 → 切换跟踪目标，清空已处理记录
+                logging.info("情绪响应：切换到会话 %s", session_id[:16])
+                self._current_sid = session_id
+                self._seen_react_fps.clear()
             if fingerprint in self._seen_react_fps:
                 return
             self._seen_react_fps.add(fingerprint)
