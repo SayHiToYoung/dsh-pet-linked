@@ -85,6 +85,29 @@ def pricing_for_model(model: str | None, when=None) -> dict:
     return dict(PRICING_DEFAULT)
 
 
+def pricing_both_for_model(model: str | None) -> tuple[dict, dict]:
+    """返回该模型 (高峰价, 低谷价) 两套定价，供"双账本"同时估算。
+
+    官方有两档价的模型（v4-flash / v4-pro / vision-exp）返回各自峰/谷价；
+    无两档价的模型（reasoner/chat/未知）两套相同，显示时归并为单值。
+    """
+    if not model:
+        return dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
+    low = str(model).lower()
+    key = "default"
+    for prefix in _MODEL_PRICING_ORDER:
+        if low.startswith(prefix):
+            key = _MODEL_PRICING_MAP[prefix]
+            break
+    if key == "flash":
+        return dict(PRICING_FLASH_PEAK), dict(PRICING_FLASH_OFF_PEAK)
+    if key == "pro":
+        return dict(PRICING_PRO_PEAK), dict(PRICING_PRO_OFF_PEAK)
+    if key == "reasoner":
+        return dict(PRICING_REASONER), dict(PRICING_REASONER)
+    return dict(PRICING_DEFAULT), dict(PRICING_DEFAULT)
+
+
 def estimate_cost_cny(input_t: int, output_t: int, cache_read: int = 0,
                       reasoning: int = 0, pricing: dict | None = None) -> float:
     """估算花费（人民币）。input 已含缓存未命中部分，缓存命中单独计便宜档。"""

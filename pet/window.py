@@ -950,7 +950,6 @@ class PetWindow(QWidget):
         fields, scopes, fmt = self._display_settings()
         if not fields or not scopes:
             return "（没有要显示的数据，可在「Token 花费设置」里勾选）"
-        pricing = token_cost_mod.pricing_for_model(self._active_model())
         tokens = {"session": self.token_session, "lifetime": self.token_lifetime}
         lines = []
         for scope in scopes:
@@ -961,9 +960,15 @@ class PetWindow(QWidget):
             parts = []
             for key in fields:
                 if key == "price":
-                    cost = token_cost_mod.estimate_cost_cny(
-                        tot["input"], tot["output"], tot["cacheRead"], tot["reasoning"], pricing)
-                    parts.append(f"¥{cost:.4f}")
+                    peak_p, off_p = token_cost_mod.pricing_both_for_model(self._active_model())
+                    c_peak = token_cost_mod.estimate_cost_cny(
+                        tot["input"], tot["output"], tot["cacheRead"], tot["reasoning"], peak_p)
+                    c_off = token_cost_mod.estimate_cost_cny(
+                        tot["input"], tot["output"], tot["cacheRead"], tot["reasoning"], off_p)
+                    if c_peak == c_off:
+                        parts.append(f"¥{c_peak:.4f}")
+                    else:
+                        parts.append(f"峰¥{c_peak:.2f}/谷¥{c_off:.2f}")
                 elif key in tot:
                     parts.append(f"{self._FIELD_LABELS.get(key, key)} {token_cost_mod.format_number(tot[key], fmt)}")
             if parts:
