@@ -201,6 +201,7 @@ class PetApp:
             on_change=self._on_work_state_change,
             # Token 记账已改为直读 DSH 会话日志，不再依赖信标上报用量
             on_usage=None,
+            on_emote=self._on_emote,
         )
         if server.start():
             self._work_server = server
@@ -280,7 +281,14 @@ class PetApp:
                 return
             self._last_react_msg = fingerprint
             self._last_react_ts = now
-            # 混合决策：本地为主，必要时 LLM 升级
+            self._react_to_text(text, f"log:{fingerprint}")
+        except Exception:
+            logging.exception("情绪响应判断失败")
+
+    # ------------------------------------------------------------ 情绪响应（实时 + 日志兜底）
+    def _react_to_text(self, text: str, origin: str) -> None:
+        """混合决策并播放动作（本地为主，必要时 LLM 升级）。"""
+        try:
             provider = None
             api_key = ""
             try:
@@ -291,10 +299,30 @@ class PetApp:
                 provider = None
             action, source = emotion_actor.decide_action(text, provider, api_key)
             if action:
-                logging.info("情绪响应 [%s]: %s <- %s", source, action, fingerprint)
+                logging.info("情绪响应 [%s]: %s <- %s", source, action, origin)
                 self._work_bridge.emotion_action.emit(action)
         except Exception:
-            logging.exception("情绪响应判断失败")
+            logging.exception("情绪响应决策失败")
+
+    def _on_emote(self, text: str) -> None:
+        """页内信标实时上报的用户消息（HTTP 线程）→ 后台决策，立即响应。"""
+        if not bool(self.config.get("emotion_reactions_enabled", True)):
+            return
+        # 仅空闲时响应
+        server = self._work_server
+        if server is not None and server.working:
+            return
+        # 节流
+        now = time.monotonic()
+        if self._last_react_ts and (now - self._last_react_ts) < self._emotion_react_interval:
+            return
+        self._last_react_ts = now
+        text = (text or "").strip()[:500]
+        if not text:
+            return
+        threading.Thread(
+            target=self._react_to_text, args=(text, "realtime"), daemon=True, name="pet-emote"
+        ).start()
 
     def _set_autostart(self, enabled: bool, win=None) -> bool:
         ok = autostart_mod.set_enabled(bool(enabled))

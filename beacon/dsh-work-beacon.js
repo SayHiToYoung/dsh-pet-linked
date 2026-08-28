@@ -19,12 +19,13 @@
   if (window.__DSH_WORK_BEACON__) return;
   window.__DSH_WORK_BEACON__ = true;
 
-  var VERSION = "v6-work";   // 信标版本（诊断用：确认页面加载的是新版）
+  var VERSION = "v7-emote";   // 信标版本（诊断用：确认页面加载的是新版）
   var WS_TAPPED = false;      // WebSocket 截获是否成功挂上
 
   var PORT = (window.__DSH_WORK_BEACON_PORT__ | 0) || 47890;
   var STATE_ENDPOINT = "http://127.0.0.1:" + PORT + "/state";
   var USAGE_ENDPOINT = "http://127.0.0.1:" + PORT + "/usage";
+  var EMOTE_ENDPOINT = "http://127.0.0.1:" + PORT + "/emote";
 
   // ---------------------------------------------------------------- 工作状态
   // 只有"工具真的在跑"才算工作（data-status=running / data-running / 工具卡片 running）。
@@ -210,8 +211,49 @@
     return null;
   }
 
-  /** 处理一帧：更新模型名；去重后上报 usage。 */
+  /** 从 user/message 事件 data 里提取纯文本（data.content 的 text 块）。 */
+  function extractUserText(data) {
+    if (!data || typeof data !== "object") return "";
+    var content = data.content;
+    var pieces = [];
+    if (typeof content === "string") {
+      pieces.push(content);
+    } else if (Array.isArray(content)) {
+      for (var i = 0; i < content.length; i++) {
+        var b = content[i];
+        if (b && typeof b === "object" && b.type === "text" && typeof b.text === "string") {
+          pieces.push(b.text);
+        }
+      }
+    }
+    var text = pieces.join("").trim();
+    // 过滤系统注入（PERSONA_LOAD / 运行时上下文 / 技能提醒等）
+    if (text.indexOf("[PERSONA_LOAD]") !== -1 || text.indexOf("Current runtime context") !== -1 ||
+        text.indexOf("<system-reminder>") !== -1 || text.indexOf("Approval policy:") !== -1) {
+      return "";
+    }
+    return text;
+  }
+
+  /** 实时上报用户消息（你一发消息，桌宠立刻响应）。 */
+  function postEmote(text) {
+    try {
+      fetch(EMOTE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text }),
+        keepalive: true
+      }).catch(function () { /* 静默 */ });
+    } catch (e) { /* 静默 */ }
+  }
+
+  /** 处理一帧：更新模型名；去重后上报 usage；实时上报用户消息。 */
   function handleFrame(event) {
+    // 实时用户消息：你按下发送 → 事件立刻到页面 → 立刻上报桌宠（不等会话日志）
+    if (event && event.type === "user/message") {
+      var ut = extractUserText(event.data);
+      if (ut) postEmote(ut);
+    }
     // 任何 assistant/message 都顺手记下模型名（即使本帧不带 usage）
     if (event && event.type === "assistant/message" && event.data && event.data.message &&
         event.data.message.source && event.data.message.source.model) {

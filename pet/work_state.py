@@ -26,10 +26,12 @@ class WorkStateServer:
 
     def __init__(self, on_change: Callable[[bool, str], None] | None = None,
                  on_usage: Callable[[dict], None] | None = None,
+                 on_emote: Callable[[str], None] | None = None,
                  port: int = DEFAULT_PORT):
         self._port = port
         self._on_change = on_change
         self._on_usage = on_usage
+        self._on_emote = on_emote
         self._lock = threading.Lock()
         self.working = False
         self.detail = ""
@@ -99,6 +101,11 @@ class WorkStateServer:
                     )
                     self._send_json(200, {"ok": True, "added": added, "usage": server.usage_snapshot()})
                     return
+                if path == "/emote":
+                    text = str(payload.get("text") or "")[:500]
+                    server.notify_emote(text)
+                    self._send_json(200, {"ok": True, "received": bool(text)})
+                    return
                 self._send_json(404, {"ok": False, "error": "not found"})
 
             def do_GET(self):
@@ -162,6 +169,18 @@ class WorkStateServer:
     def usage_snapshot(self) -> dict:
         with self._lock:
             return {**dict(self.session_usage), "model": self.model}
+
+    def notify_emote(self, text: str) -> None:
+        """页内信标实时上报的用户消息 → 触发情绪响应回调。"""
+        text = (text or "").strip()
+        if not text:
+            return
+        cb = self._on_emote
+        if cb is not None:
+            try:
+                cb(text)
+            except Exception:
+                logging.exception("work_state emote 回调失败")
 
     def snapshot(self) -> dict:
         with self._lock:
