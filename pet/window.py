@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import json
 from pathlib import Path
 
 import shiboken6
@@ -245,12 +246,15 @@ class PetWindow(QWidget):
         self.work_state: bool = False
         self.work_detail: str = ""
 
-        # ---- Token 花费统计（二次开发新增，DSH 驱动）----
-        # session = 本次进程累计；lifetime = 跨重启持久累计（config 目录 token_usage.json）
-        # token_model = 最近一次 DSH 上报的模型名
+        # ---- Token 花费统计（二次开发新增，DSH 会话日志驱动）----
+        # token_session = 当前会话总数（每轮从会话日志解析）；token_lifetime = 跨重启累计
+        # token_model = 会话日志里的模型名
         self.token_session: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-        self.token_lifetime: dict = token_cost_mod.load_lifetime(self._token_usage_path())
+        self.token_lifetime: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
         self.token_model: str = ""
+        self._ledger_session: str = ""
+        self._ledger_sessions: dict = {}
+        self._load_ledger_state()
 
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
@@ -840,33 +844,94 @@ class PetWindow(QWidget):
             self.show_bubble("收工！摸鱼模式开启～🐋", duration_ms=2400)
             self._pick_next()
 
-    # ================================================================ Token 花费统计（DSH 驱动）
+    # ================================================================ Token 花费统计（DSH 会话日志驱动）
     def _token_usage_path(self) -> Path:
+        return Path(self.cfg.dir) / "token_ledger.json"
+
+    def _legacy_token_usage_path(self) -> Path:
         return Path(self.cfg.dir) / "token_usage.json"
 
-    # 模型名来自 DSH 事件流（信标上报），桌宠不读自身 API 配置。
-    # 还没收到模型时用默认档估算。
+    # 模型名来自 DSH 会话日志；还没拿到时用默认档估算。
     DEFAULT_MODEL = "deepseek-chat"
 
     def _active_model(self) -> str:
         return self.token_model or self.DEFAULT_MODEL
 
-    def add_token_usage(self, added: dict) -> None:
-        """信标上报的 token 增量 + 模型名（全部来自 DSH 会话）→ 累计 session + lifetime。"""
-        if not isinstance(added, dict):
+    def _empty_tokens(self) -> dict:
+        return {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+
+    def _load_ledger_state(self) -> None:
+        """读取账本状态：{lifetime, sessions{<sid>: totals}, currentSession}。"""
+        path = self._token_usage_path()
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                lt = data.get("lifetime")
+                if isinstance(lt, dict):
+                    self.token_lifetime = {
+                        k: int(lt.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
+                    }
+                sessions = data.get("sessions")
+                if isinstance(sessions, dict):
+                    self._ledger_sessions = {
+                        str(sid): {k: int(t.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")}
+                        for sid, t in sessions.items() if isinstance(t, dict)
+                    }
+                self._ledger_session = str(data.get("currentSession") or "")
+                return
+        except Exception:
+            pass
+        # 兼容旧文件：从 token_usage.json 迁移 lifetime
+        legacy = self._legacy_token_usage_path()
+        if legacy.is_file():
+            try:
+                d = json.loads(legacy.read_text(encoding="utf-8"))
+                if isinstance(d, dict):
+                    self.token_lifetime = {
+                        k: int(d.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
+                    }
+            except Exception:
+                pass
+
+    def _save_ledger_state(self) -> None:
+        try:
+            path = self._token_usage_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "lifetime": self.token_lifetime,
+                "sessions": self._ledger_sessions,
+                "currentSession": self._ledger_session,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def update_ledger(self, session_id: str, totals: dict, model: str = "") -> None:
+        """由会话日志读取驱动：本会话取总数，累计按增量累加（跨重启不重复计）。"""
+        session_id = str(session_id or "")
+        if not session_id or not isinstance(totals, dict):
             return
-        model = str(added.get("model") or "").strip()
         if model:
-            self.token_model = model
-        touched = False
-        for key in ("input", "output", "cacheRead", "reasoning"):
-            value = int(added.get(key, 0) or 0)
-            if value > 0:
-                self.token_session[key] += value
-                self.token_lifetime[key] += value
-                touched = True
-        if touched:
-            token_cost_mod.save_lifetime(self._token_usage_path(), self.token_lifetime)
+            self.token_model = str(model)[:120]
+        # 本会话展示 = 当前会话日志解析出的总数（权威）
+        self.token_session = {
+            k: int(totals.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
+        }
+        self._ledger_session = session_id
+        # 累计：相对上次记录的该会话总数取增量
+        prev = self._ledger_sessions.get(session_id, self._empty_tokens())
+        for k in ("input", "output", "cacheRead", "reasoning"):
+            cur = int(totals.get(k, 0) or 0)
+            delta = cur - int(prev.get(k, 0) or 0)
+            if delta > 0:
+                self.token_lifetime[k] += delta
+        self._ledger_sessions[session_id] = {
+            k: int(totals.get(k, 0) or 0) for k in ("input", "output", "cacheRead", "reasoning")
+        }
+        self._save_ledger_state()
+
+    def add_token_usage(self, added: dict) -> None:
+        """（兼容旧信标路径，已由会话日志驱动取代；保留为空操作避免误调用。）"""
+        return
 
     def token_cost_text(self) -> str:
         """格式化当前累计：本会话 + 累计，只显示 输入/输出/命中/价格 四项。"""

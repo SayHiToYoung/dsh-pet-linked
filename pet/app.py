@@ -31,6 +31,7 @@ from .instance_launcher import launch_new_pet
 from .library import MovieLibrary
 from .window import PetWindow
 from .work_state import WorkStateServer
+from . import session_reader
 from .fun_image_popup import restore_ojingjing_windows
 from .runtime_cleanup import cleanup_stale_runtime_dirs
 
@@ -76,16 +77,16 @@ class _UpdateBridge(_BackgroundResult):
 
 
 class _WorkStateBridge(QObject):
-    """把 HTTP 接收线程里的工作状态/用量变化安全投递到 Qt 主线程。"""
+    """把后台线程（信标 HTTP / 会话日志轮询）的结果安全投递到 Qt 主线程。"""
 
     changed = Signal(bool, str)
-    usage_changed = Signal(object)
+    ledger_changed = Signal(str, object, str)
 
     def __init__(self, controller) -> None:
         super().__init__()
         self.controller = controller
         self.changed.connect(self._apply)
-        self.usage_changed.connect(self._apply_usage)
+        self.ledger_changed.connect(self._apply_ledger)
 
     def _apply(self, working: bool, detail: str) -> None:
         win = self.controller.win
@@ -95,13 +96,13 @@ class _WorkStateBridge(QObject):
             except Exception:
                 logging.exception("work_state 应用失败")
 
-    def _apply_usage(self, added: dict) -> None:
+    def _apply_ledger(self, session_id: str, totals: dict, model: str) -> None:
         win = self.controller.win
         if win is not None:
             try:
-                win.add_token_usage(added)
+                win.update_ledger(session_id, totals, model)
             except Exception:
-                logging.exception("token usage 应用失败")
+                logging.exception("token ledger 应用失败")
 
 
 def _setup_logging(config: Config) -> None:
@@ -161,6 +162,8 @@ class PetApp:
         self._update_bridge = None
         self._work_bridge = _WorkStateBridge(self)
         self._work_server: WorkStateServer | None = None
+        self._ledger_timer: QTimer | None = None
+        self._ledger_busy = False
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -170,6 +173,7 @@ class PetApp:
         self._apply_spawn_offset()
         self._apply_balance_timer()
         self._start_work_state()
+        self._start_ledger_timer()
         QTimer.singleShot(3500, self._check_autostart_wanted)
 
     # ------------------------------------------------------------ DSH 工作状态联动
@@ -180,7 +184,8 @@ class PetApp:
         self.app.aboutToQuit.connect(self._stop_work_state)
         server = WorkStateServer(
             on_change=self._on_work_state_change,
-            on_usage=self._on_usage_change,
+            # Token 记账已改为直读 DSH 会话日志，不再依赖信标上报用量
+            on_usage=None,
         )
         if server.start():
             self._work_server = server
@@ -197,14 +202,41 @@ class PetApp:
         # HTTP 线程 → Qt 主线程（Signal 队列投递）
         self._work_bridge.changed.emit(working, detail)
 
-    def _on_usage_change(self, added: dict) -> None:
-        # HTTP 线程 → Qt 主线程（Signal 队列投递）
-        self._work_bridge.usage_changed.emit(added)
-
     def _stop_work_state(self) -> None:
         if self._work_server is not None:
             self._work_server.stop()
             self._work_server = None
+
+    # ------------------------------------------------------------ Token 账本（DSH 会话日志轮询）
+    def _start_ledger_timer(self) -> None:
+        """每 5 秒在后台线程解析最新 DSH 会话日志，把用量投递到账本。"""
+        if self._ledger_timer is not None:
+            return
+        timer = QTimer()
+        timer.setInterval(5000)
+        timer.timeout.connect(self._poll_ledger)
+        self._ledger_timer = timer
+        timer.start()
+        # 启动后立刻先跑一次
+        QTimer.singleShot(300, self._poll_ledger)
+
+    def _poll_ledger(self) -> None:
+        if self._ledger_busy:
+            return
+        self._ledger_busy = True
+        threading.Thread(target=self._ledger_worker, daemon=True, name="pet-ledger").start()
+
+    def _ledger_worker(self) -> None:
+        try:
+            session_file = session_reader.find_current_session_file()
+            if session_file is None:
+                return
+            sid, totals, model = session_reader.read_session_usage(session_file)
+            self._work_bridge.ledger_changed.emit(sid, totals, model)
+        except Exception:
+            logging.exception("会话日志账本解析失败")
+        finally:
+            self._ledger_busy = False
 
     def _set_autostart(self, enabled: bool, win=None) -> bool:
         ok = autostart_mod.set_enabled(bool(enabled))
