@@ -869,9 +869,8 @@ class PetWindow(QWidget):
             token_cost_mod.save_lifetime(self._token_usage_path(), self.token_lifetime)
 
     def token_cost_text(self) -> str:
-        """格式化当前累计：本会话 + 累计（估算人民币，模型来自 DSH）。"""
-        model = self._active_model()
-        pricing = token_cost_mod.pricing_for_model(model)
+        """格式化当前累计：本会话 + 累计，只显示 输入/输出/命中/价格 四项。"""
+        pricing = token_cost_mod.pricing_for_model(self._active_model())
         s = self.token_session
         l = self.token_lifetime
         s_cost = token_cost_mod.estimate_cost_cny(
@@ -879,11 +878,8 @@ class PetWindow(QWidget):
         l_cost = token_cost_mod.estimate_cost_cny(
             l["input"], l["output"], l["cacheRead"], l["reasoning"], pricing)
         lines = [
-            "本会话 Token 花费（估算）",
-            f"模型 {model}",
-            f"输入 {s['input']:,} · 缓存 {s['cacheRead']:,} · 输出 {s['output']:,}",
-            f"≈ ¥{s_cost:.2f}",
-            f"累计（桌宠记录）≈ ¥{l_cost:.2f}",
+            f"本会话：输入 {s['input']:,} · 输出 {s['output']:,} · 命中 {s['cacheRead']:,} · ¥{s_cost:.2f}",
+            f"累计：输入 {l['input']:,} · 输出 {l['output']:,} · 命中 {l['cacheRead']:,} · ¥{l_cost:.2f}",
         ]
         return "\n".join(lines)
 

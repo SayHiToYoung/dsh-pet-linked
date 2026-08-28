@@ -38,9 +38,10 @@ class WorkStateServer:
         self.model = ""  # 最近一次上报携带的模型名（来自 DSH 事件流）
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        # 信标诊断信息（页面加载的信标版本 / WebSocket 截获是否挂上）
+        # 信标诊断信息（页面加载的信标版本 / WebSocket 截获是否挂上 / 截获计数）
         self.beacon_version: str = ""
         self.beacon_ws_tap: bool = False
+        self.beacon_diag: dict = {}
 
     @property
     def port(self) -> int:
@@ -84,7 +85,8 @@ class WorkStateServer:
                     detail = str(payload.get("detail", ""))[:80]
                     beacon = str(payload.get("beacon") or "").strip()[:40]
                     ws_tap = bool(payload.get("wsTap", False))
-                    changed = server.update(working, detail, beacon=beacon, ws_tap=ws_tap)
+                    diag = payload.get("diag") if isinstance(payload.get("diag"), dict) else {}
+                    changed = server.update(working, detail, beacon=beacon, ws_tap=ws_tap, diag=diag)
                     self._send_json(200, {"ok": True, "working": working, "detail": detail, "changed": changed})
                     return
                 if path == "/usage":
@@ -112,11 +114,17 @@ class WorkStateServer:
 
         return Handler
 
-    def update(self, working: bool, detail: str, beacon: str = "", ws_tap: bool = False) -> bool:
+    def update(self, working: bool, detail: str, beacon: str = "", ws_tap: bool = False,
+               diag: dict | None = None) -> bool:
         with self._lock:
             if beacon:
                 self.beacon_version = beacon
             self.beacon_ws_tap = ws_tap
+            if diag:
+                self.beacon_diag = {
+                    k: int(v) if isinstance(v, (int, float)) else v
+                    for k, v in diag.items()
+                }
             if working == self.working and detail == self.detail:
                 return False
             self.working = working
@@ -162,6 +170,7 @@ class WorkStateServer:
                 "detail": self.detail,
                 "beacon": self.beacon_version,
                 "wsTap": self.beacon_ws_tap,
+                "diag": dict(self.beacon_diag),
             }
 
     def start(self) -> bool:

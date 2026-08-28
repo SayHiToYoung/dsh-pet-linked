@@ -19,7 +19,7 @@
   if (window.__DSH_WORK_BEACON__) return;
   window.__DSH_WORK_BEACON__ = true;
 
-  var VERSION = "v3-usage";   // 信标版本（诊断用：确认页面加载的是新版）
+  var VERSION = "v5-usage";   // 信标版本（诊断用：确认页面加载的是新版）
   var WS_TAPPED = false;      // WebSocket 截获是否成功挂上
 
   var PORT = (window.__DSH_WORK_BEACON_PORT__ | 0) || 47890;
@@ -68,7 +68,13 @@
     if (!force && st.working === lastWorking && st.detail === lastDetail) return;
     lastWorking = st.working;
     lastDetail = st.detail;
-    var body = JSON.stringify({ working: st.working, detail: st.detail, beacon: VERSION, wsTap: WS_TAPPED });
+    var body = JSON.stringify({
+      working: st.working, detail: st.detail, beacon: VERSION, wsTap: WS_TAPPED,
+      diag: { framesSeen: DIAG.framesSeen, usageSeen: DIAG.usageSeen,
+              usagePosted: DIAG.usagePosted, postFailures: DIAG.postFailures,
+              lastUsageAt: DIAG.lastUsageAt,
+              pending: usagePending.input + usagePending.output + usagePending.cacheRead + usagePending.reasoning }
+    });
     try {
       fetch(STATE_ENDPOINT, {
         method: "POST",
@@ -94,6 +100,8 @@
   var lastModel = "";          // 最近一次抓到的模型名
   var seenUsageKeys = {};      // "turn:step" 去重
   var seenUsageCount = 0;
+  // 诊断计数
+  var DIAG = { framesSeen: 0, usageSeen: 0, usagePosted: 0, postFailures: 0, lastUsageAt: 0 };
 
   /** 从事件里取 {usage, model, turn, step}（assistant/message 与 assistant/chunk）。 */
   function extractUsageInfo(event) {
@@ -142,6 +150,8 @@
     usagePending.cacheRead += usage.cacheReadTokens || 0;
     usagePending.reasoning += usage.reasoningTokens || 0;
     if (model) lastModel = model;
+    DIAG.usageSeen += 1;
+    DIAG.lastUsageAt = Date.now();
     if (usagePostTimer) return;
     usagePostTimer = setTimeout(function () {
       usagePostTimer = null;
@@ -160,14 +170,19 @@
           headers: { "Content-Type": "application/json" },
           body: body,
           keepalive: true
+        }).then(function (res) {
+          if (res.ok) { DIAG.usagePosted += 1; }
+          else { DIAG.postFailures += 1; usagePending.input += pending.input; usagePending.output += pending.output; usagePending.cacheRead += pending.cacheRead; usagePending.reasoning += pending.reasoning; }
         }).catch(function () {
           // 上报失败：把增量补回待发池，下次心跳重试
+          DIAG.postFailures += 1;
           usagePending.input += pending.input;
           usagePending.output += pending.output;
           usagePending.cacheRead += pending.cacheRead;
           usagePending.reasoning += pending.reasoning;
         });
       } catch (e) {
+        DIAG.postFailures += 1;
         usagePending.input += pending.input;
         usagePending.output += pending.output;
         usagePending.cacheRead += pending.cacheRead;
@@ -176,8 +191,31 @@
     }, usageDebounceMs);
   }
 
-  /** 处理一帧：去重后上报。 */
+  /** 递归扫描任意帧里的 model 字段（不依赖固定路径，兜底用）。 */
+  function findModel(obj, depth) {
+    if (!obj || typeof obj !== "object" || depth > 8) return null;
+    if (typeof obj.model === "string" && obj.model.length >= 2 && obj.model.length <= 120) {
+      return obj.model;
+    }
+    for (var k in obj) {
+      if (Object.prototype.hasOwnProperty.call(obj, k)) {
+        var r = findModel(obj[k], depth + 1);
+        if (r) return r;
+      }
+    }
+    return null;
+  }
+
+  /** 处理一帧：更新模型名；去重后上报 usage。 */
   function handleFrame(event) {
+    // 任何 assistant/message 都顺手记下模型名（即使本帧不带 usage）
+    if (event && event.type === "assistant/message" && event.data && event.data.message &&
+        event.data.message.source && event.data.message.source.model) {
+      lastModel = String(event.data.message.source.model).slice(0, 120);
+    } else if (!lastModel && event) {
+      var m = findModel(event, 0);
+      if (m) lastModel = String(m).slice(0, 120);
+    }
     var info = extractUsageInfo(event);
     if (!info) return;
     var key = (info.turn !== undefined ? info.turn : "?") + ":" + (info.step !== undefined ? info.step : "?");
@@ -197,6 +235,7 @@
   function captureMessage(ev) {
     var data = ev && ev.data;
     if (typeof data !== "string") return; // 二进制帧跳过
+    DIAG.framesSeen += 1;
     var frame;
     try { frame = JSON.parse(data); } catch (e) { return; }
     // 服务器帧形如 {type:"server-request", payload:{...事件...}}
@@ -238,6 +277,45 @@
     WS_TAPPED = true;
   }
 
+  /** 心跳时把积压的用量重试发出去（桌宠重启/短暂离线后自愈）。 */
+  function flushUsagePending() {
+    if (usagePostTimer) return;
+    var total = usagePending.input + usagePending.output + usagePending.cacheRead + usagePending.reasoning;
+    if (total <= 0) return;
+    var pending = usagePending;
+    usagePending = { input: 0, output: 0, cacheRead: 0, reasoning: 0 };
+    var body = JSON.stringify({
+      inputTokens: pending.input,
+      outputTokens: pending.output,
+      cacheReadTokens: pending.cacheRead,
+      reasoningTokens: pending.reasoning,
+      model: lastModel
+    });
+    try {
+      fetch(USAGE_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body,
+        keepalive: true
+      }).then(function (res) {
+        if (res.ok) { DIAG.usagePosted += 1; }
+        else { DIAG.postFailures += 1; usagePending.input += pending.input; usagePending.output += pending.output; usagePending.cacheRead += pending.cacheRead; usagePending.reasoning += pending.reasoning; }
+      }).catch(function () {
+        DIAG.postFailures += 1;
+        usagePending.input += pending.input;
+        usagePending.output += pending.output;
+        usagePending.cacheRead += pending.cacheRead;
+        usagePending.reasoning += pending.reasoning;
+      });
+    } catch (e) {
+      DIAG.postFailures += 1;
+      usagePending.input += pending.input;
+      usagePending.output += pending.output;
+      usagePending.cacheRead += pending.cacheRead;
+      usagePending.reasoning += pending.reasoning;
+    }
+  }
+
   // ---------------------------------------------------------------- 启动
   // 1) WebSocket 包装要在页面创建连接之前 —— 本脚本是 <head> 里的普通脚本，
   //    在 app 的 defer 模块执行前运行，时机正确。
@@ -255,7 +333,7 @@
   } catch (e) { /* 退化轮询 */ }
 
   scanTimer = setInterval(function () { sendState(false); }, 300);
-  heartbeatTimer = setInterval(function () { sendState(true); }, 8000);
+  heartbeatTimer = setInterval(function () { sendState(true); flushUsagePending(); }, 8000);
 
   if (document.readyState === "complete") {
     sendState(true);

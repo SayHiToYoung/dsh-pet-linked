@@ -19,24 +19,36 @@ const BACKUP_ROOT = process.env.DSH_WORK_BEACON_BACKUP || path.join(os.tmpdir(),
 
 const BEACON_REL = "node_modules/@deepseek-ai/dsh-web-frontend/dist/assets/dsh-work-beacon.js";
 const INDEX_REL = "node_modules/@deepseek-ai/dsh-web-frontend/dist/index.html";
-const INJECT_HTML =
-  `    <script src="/assets/dsh-work-beacon.js" data-dsh-work-beacon></script>`;
+// 信标 URL 带内容哈希版本号：内容一变 URL 就变，浏览器不会吃到旧缓存
+function injectHtml(version) {
+  return `    <script src="/assets/dsh-work-beacon.js?v=${version}" data-dsh-work-beacon></script>`;
+}
 
 function read(file) { return fs.readFileSync(file, "utf8"); }
 function write(file, content) { fs.writeFileSync(file, content, "utf8"); }
 function sha256(content) { return crypto.createHash("sha256").update(content).digest("hex"); }
 function timestamp() { return new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 17); }
 
-function patchIndexHtml(source) {
-  if (source.includes(MARKER)) return { source, changed: false };
-  const tag = `<script src="/assets/dsh-work-beacon.js"`;
-  if (source.includes(tag)) {
-    // 已注入但缺 marker：补上 marker（幂等修复）
-    const first = source.indexOf(tag);
-    const marker = `<!-- ${MARKER} -->\n`;
-    return { source: source.slice(0, first) + marker + source.slice(first), changed: true };
+/** 替换 index.html 里已有的信标 script 标签（任意版本），返回是否改动。 */
+function replaceBeaconTag(source, version) {
+  const re = /<script src="\/assets\/dsh-work-beacon\.js(?:\?[^"]*)?" data-dsh-work-beacon><\/script>/;
+  if (re.test(source)) {
+    return { source: source.replace(re, injectHtml(version)), changed: true };
   }
-  const marker = `  <!-- ${MARKER} -->\n${INJECT_HTML}`;
+  return { source, changed: false };
+}
+
+function patchIndexHtml(source, version) {
+  // 1) 已有信标标签（任意版本）→ 更新到当前版本
+  const replaced = replaceBeaconTag(source, version);
+  if (replaced.changed) return replaced;
+  // 2) 已有 marker（旧结构无版本号）→ 更新
+  if (source.includes(MARKER)) {
+    const start = source.indexOf(`<!-- ${MARKER} -->`);
+    return { source: source.slice(0, start) + `  <!-- ${MARKER} -->\n${injectHtml(version)}\n` + source.slice(start + source.slice(start).indexOf("\n") + 1), changed: true };
+  }
+  // 3) 全新注入
+  const marker = `  <!-- ${MARKER} -->\n${injectHtml(version)}`;
   const anchor = "</head>";
   const at = source.lastIndexOf(anchor);
   if (at === -1) throw new Error("index.html: </head> anchor not found");
@@ -45,15 +57,18 @@ function patchIndexHtml(source) {
 
 function plan(target) {
   const base = path.resolve(target);
+  const assetsRoot = path.join(base, "node_modules/@deepseek-ai/dsh-web-frontend/dist", "assets");
   const beaconSrc = path.join(EXT, "beacon", "dsh-work-beacon.js");
   if (!fs.existsSync(beaconSrc)) throw new Error(`beacon missing: ${beaconSrc}`);
-  const assetsRoot = path.join(base, "node_modules/@deepseek-ai/dsh-web-frontend/dist", "assets");
+  const version = sha256(fs.readFileSync(beaconSrc)).slice(0, 8);
   const writes = [
-    { rel: INDEX_REL, content: patchIndexHtml(read(path.join(base, INDEX_REL))).source },
+    { rel: INDEX_REL, content: patchIndexHtml(read(path.join(base, INDEX_REL)), version).source },
     { rel: BEACON_REL, content: fs.readFileSync(beaconSrc) },
   ];
   return { base, assetsRoot, writes };
 }
+
+
 
 function apply(target = DEFAULT_TARGET) {
   const { base, writes } = plan(target);
@@ -66,10 +81,12 @@ function apply(target = DEFAULT_TARGET) {
              originalSha256: original === null ? null : sha256(original),
              patchedSha256: sha256(item.content) };
   });
-  // 已应用判定：html 已带 marker 且 beacon 已存在
-  const htmlApplied = read(path.join(base, INDEX_REL)).includes(MARKER);
-  if (htmlApplied && fs.existsSync(path.join(base, BEACON_REL))) {
-    console.log("[dsh-work-beacon] already applied.");
+  // 已应用判定：html 已带当前版本号 且 beacon 文件在
+  const htmlNow = read(path.join(base, INDEX_REL));
+  const currentVersion = (writes[0].content.match(/dsh-work-beacon\.js\?v=([0-9a-f]+)/) || [])[1] || "";
+  if (currentVersion && htmlNow.includes(`dsh-work-beacon.js?v=${currentVersion}`) &&
+      fs.existsSync(path.join(base, BEACON_REL))) {
+    console.log("[dsh-work-beacon] already applied (current version).");
     return "already";
   }
   const backupDir = path.join(BACKUP_ROOT, `dsh-work-beacon-${timestamp()}`);
