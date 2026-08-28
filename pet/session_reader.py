@@ -266,13 +266,13 @@ def _workspace_dirs(base: Path) -> list[Path]:
 
 
 def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]:
-    """扫描（当前工作区的）所有会话，返回最新一条用户文本消息 (session_id, fingerprint, text)。
+    """扫描所有工作区的所有会话，返回最新一条用户文本消息 (session_id, fingerprint, text)。
 
-    默认只扫桌宠所在工作区（workspace_dir()），避免别的项目会话干扰；
-    用消息的 time 字段比较（跨会话 seq 不可比）；过滤系统注入与密钥。
-    找不到返回 ("", "", "")。
+    默认扫 sessions_root()（全部工作区）——"一宠跟人走"：用户切到哪个工作区/会话，
+    桌宠就跟着那个会话反应；用消息 time 字段比较（跨会话 seq 不可比）；
+    过滤系统注入与密钥。找不到返回 ("", "", "")。
     """
-    base = root or workspace_dir()
+    base = root or sessions_root()
     best = None  # (time, session_id, fingerprint, text)
     for ws in _workspace_dirs(base):
         try:
