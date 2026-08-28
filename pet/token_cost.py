@@ -6,13 +6,24 @@ DeepSeek 官方 API 不返回金额，只返回 token 数，所以这是"估算"
 定价参考 DeepSeek 官方公开价（USD / 1M tokens），汇率固定按 7.2（参考 dsh-balance）。
 
 默认按 deepseek-chat 定价；reasoner 或自定义模型可在 config 里覆盖。
+v4-flash / v4-pro / v4-flash-vision-exp 按官方两档价（高峰/低谷）依当前时间自动切换。
 """
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
-# USD / 1M tokens（参考 api-docs.deepseek.com 官方定价）
+# USD / 1M tokens（官方价，2026-08-16 调价后；来源 api-docs.deepseek.com/quick_start/pricing）
+# 官方两档价：高峰（peak）为低谷（off-peak）的两倍。高峰 = UTC 周一~周五 01:00-04:00、06:00-10:00。
+#   v4-flash：输入(未命中) 0.44/0.22 · 缓存命中 0.014/0.007 · 输出 1.32/0.66
+#   v4-pro：  输入(未命中) 1.32/0.66 · 缓存命中 0.044/0.022 · 输出 3.96/1.98
+#   v4-flash-vision-exp：同 v4-flash
+PRICING_FLASH_PEAK = {"input": 0.44, "cacheRead": 0.014, "output": 1.32}
+PRICING_FLASH_OFF_PEAK = {"input": 0.22, "cacheRead": 0.007, "output": 0.66}
+PRICING_PRO_PEAK = {"input": 1.32, "cacheRead": 0.044, "output": 3.96}
+PRICING_PRO_OFF_PEAK = {"input": 0.66, "cacheRead": 0.022, "output": 1.98}
+# 已无官方两档价的历史模型（deepseek-chat/v3/r1 等）回落单档，仅作估算参考
 PRICING_DEFAULT = {
     "input": 0.27,        # 缓存未命中输入
     "cacheRead": 0.07,    # 缓存命中输入
@@ -23,36 +34,54 @@ PRICING_REASONER = {
     "cacheRead": 0.14,
     "output": 2.19,
 }
-# deepseek-v4-flash 系列（实测价：输入 $0.15 / 输出 $0.29 / 缓存命中 $0.02）
-PRICING_V4_FLASH = {
-    "input": 0.15,
-    "cacheRead": 0.02,
-    "output": 0.29,
-}
 # 固定汇率（人民币/美元）
 EXCHANGE_RATE = 7.2
 
-# 可识别的模型前缀 → 定价档位（长前缀优先匹配）
-MODEL_PRICING_MAP = {
-    "deepseek-reasoner": PRICING_REASONER,
-    "deepseek-v4-flash": PRICING_V4_FLASH,
-    "deepseek-v4": PRICING_V4_FLASH,
-    "deepseek-chat": PRICING_DEFAULT,
-    "deepseek-v3": PRICING_DEFAULT,
-    "deepseek-r1": PRICING_REASONER,
+# 模型前缀 → 定价档位键（长前缀优先匹配，避免 "deepseek-v4" 抢先吞掉 "deepseek-v4-flash"）
+_MODEL_PRICING_MAP = {
+    "deepseek-reasoner": "reasoner",
+    "deepseek-v4-flash-vision-exp": "flash",
+    "deepseek-v4-flash": "flash",
+    "deepseek-v4-pro": "pro",
+    "deepseek-v4": "flash",
+    "deepseek-chat": "default",
+    "deepseek-v3": "default",
+    "deepseek-r1": "reasoner",
 }
-# 按名称长度降序匹配，避免 "deepseek-v4" 抢先吞掉 "deepseek-v4-flash"
-_MODEL_PRICING_ORDER = sorted(MODEL_PRICING_MAP, key=len, reverse=True)
+_MODEL_PRICING_ORDER = sorted(_MODEL_PRICING_MAP, key=len, reverse=True)
 
 
-def pricing_for_model(model: str | None) -> dict:
-    """按模型名选定价；未知模型回落默认。"""
+def _is_peak_now(when=None) -> bool:
+    """官方高峰时段判断（UTC）：周一~周五 01:00-04:00、06:00-10:00；周末/其余为低谷。
+
+    `when` 可注入 datetime 用于测试；默认取当前 UTC 时间。
+    """
+    when = when or datetime.now(timezone.utc)
+    if when.weekday() >= 5:  # 周六/周日 → 低谷
+        return False
+    minutes = when.hour * 60 + when.minute
+    return (60 <= minutes < 240) or (360 <= minutes < 600)
+
+
+def pricing_for_model(model: str | None, when=None) -> dict:
+    """按模型名选定价；官方两档价模型按当前时间自动切高峰/低谷，其余回落默认档。
+
+    `when` 可注入 datetime 用于测试；默认取当前 UTC 时间判断高峰。
+    """
     if not model:
         return dict(PRICING_DEFAULT)
     low = str(model).lower()
+    key = "default"
     for prefix in _MODEL_PRICING_ORDER:
         if low.startswith(prefix):
-            return dict(MODEL_PRICING_MAP[prefix])
+            key = _MODEL_PRICING_MAP[prefix]
+            break
+    if key == "flash":
+        return dict(PRICING_FLASH_PEAK if _is_peak_now(when) else PRICING_FLASH_OFF_PEAK)
+    if key == "pro":
+        return dict(PRICING_PRO_PEAK if _is_peak_now(when) else PRICING_PRO_OFF_PEAK)
+    if key == "reasoner":
+        return dict(PRICING_REASONER)
     return dict(PRICING_DEFAULT)
 
 
@@ -88,11 +117,12 @@ def format_number(n, style: str = "auto") -> str:
         if value >= 1_000:
             return f"{value / 1_000:.1f}K"
         return str(value)
-    # auto: 万/亿
+    # auto: 粒度调细 —— 10 万以下完整千分位，万/亿档保留更多小数位，
+    # 让增量变化肉眼可见（原版 1 万/100 万才动一位，小增量被格式抹平）。
     if value >= 100_000_000:
-        return f"{value / 100_000_000:.2f}亿"
-    if value >= 10_000:
-        return f"{value / 10_000:.1f}万"
+        return f"{value / 100_000_000:.3f}亿"
+    if value >= 100_000:
+        return f"{value / 10_000:.2f}万"
     return f"{value:,}"
 
 

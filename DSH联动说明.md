@@ -19,7 +19,7 @@ DSH 页面(浏览器/Electron 渲染器)
 Token 账本（直读 DSH 会话日志，权威且不依赖页面）
 DSH 落盘 ~/.dsh/sessions/<workspace>/session-<id>/session.jsonl.zstd
    （追加式 zstd 多帧；每回合 assistant/message 带 usage + 模型名）
-        ▲ 每 5 秒轮询（后台线程）
+        ▲ 每 2 秒轮询（后台线程）
         │  session_reader.py：find_current_session_file 找最新会话
         │  → 快速解压(read_across_frames, ~30ms) → 逐回合解析 usage + 模型
         │  → aggregate_all_sessions 汇总所有工作区全部会话（带 mtime+size 缓存）
@@ -36,9 +36,9 @@ PetWindow.update_ledger()
 | --- | --- |
 | `pet/work_state.py` | **新增**：本地 HTTP 接收端（127.0.0.1:47890，工作状态 `/state`） |
 | `pet/session_reader.py` | **新增**：直读 DSH 会话日志（~/.dsh/sessions），逐回合解析 token 用量与模型；`aggregate_all_sessions` 全工作区汇总 |
-| `pet/token_cost.py` | **新增**：DeepSeek 定价表（v4-flash $0.15/$0.29/$0.02 等）+ 估算 + `format_number` 紧凑格式化（万/亿、K/M、完整三档） |
+| `pet/token_cost.py` | **新增**：DeepSeek 定价表（官方 2026-08 最新价；`v4-pro`/`v4-flash`/`v4-flash-vision-exp` 峰谷两档按当前时间自动切换）+ 估算 + `format_number` 紧凑格式化（万/亿、K/M、完整三档；auto 档粒度调细，价格 4 位小数） |
 | `pet/token_cost_dialog.py` | **新增**：Token 花费显示设置窗口（勾选字段/口径/格式，存 config.json） |
-| `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡；`open_token_cost_settings` |
+| `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡（价格 4 位小数）；`open_token_cost_settings` |
 | `pet/app.py` | 拉起 WorkStateServer；`_WorkStateBridge` 投递；每 2 秒轮询会话日志（当前会话 + 全工作区总账）；情绪监听（一宠跟人走）；`_set_app_icon` 鲸鱼 Dock 图标；托盘「Token 花费统计/设置」 |
 | `pet/context_menus/modern.py` `legacy.py` | 右键菜单「Token 花费统计」「Token 花费设置」入口 |
 | `pet/emotion_actor.py` | **新增**：情绪→动作混合引擎（本地关键词 + LLM 升级导演） |
@@ -111,5 +111,5 @@ curl -s http://127.0.0.1:47890/health         # 健康检查
   工具卡片 running）；**纯聊天不算工作**（`data-state="ongoing"` 只表示回合进行中）。只**读**，不触碰业务逻辑；
   桌宠没开时信标静默失败，不影响 DSH。所有流量本机回环（127.0.0.1），不对外。
 - usage 数据结构（来自 DSH `dsh-llm-deepseek` 的 `mapUsage`）：`{inputTokens, outputTokens, cacheReadTokens?, reasoningTokens?}`；模型名在 `assistant/message.message.source.model`。
-- **Token 花费是估算**：DeepSeek API 只返回 token 数、不返回金额，金额 = token × 单价（参考官方定价，汇率 7.2）不是账单；`deepseek-v4` 系列为峰谷计费，本估算按非高峰费率。定价可在 `pet/token_cost.py` 调整。
+- **Token 花费是估算**：DeepSeek API 只返回 token 数、不返回金额，金额 = token × 单价（参考官方定价，汇率 7.2）不是账单；`deepseek-v4` 系列为峰谷计费，**本估算按当前时间自动切换高峰/低谷费率**（高峰 = UTC 周一~五 01:00-04:00、06:00-10:00，低谷为高峰一半）。定价与峰谷窗口可在 `pet/token_cost.py` 调整。
 - **显示设置**存 `config.json`（键 `token_display_fields` / `token_display_scopes` / `token_display_format`），跨重启保留。

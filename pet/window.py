@@ -963,7 +963,7 @@ class PetWindow(QWidget):
                 if key == "price":
                     cost = token_cost_mod.estimate_cost_cny(
                         tot["input"], tot["output"], tot["cacheRead"], tot["reasoning"], pricing)
-                    parts.append(f"¥{cost:.2f}")
+                    parts.append(f"¥{cost:.4f}")
                 elif key in tot:
                     parts.append(f"{self._FIELD_LABELS.get(key, key)} {token_cost_mod.format_number(tot[key], fmt)}")
             if parts:
