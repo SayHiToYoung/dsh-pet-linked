@@ -19,7 +19,7 @@
   if (window.__DSH_WORK_BEACON__) return;
   window.__DSH_WORK_BEACON__ = true;
 
-  var VERSION = "v5-usage";   // 信标版本（诊断用：确认页面加载的是新版）
+  var VERSION = "v6-work";   // 信标版本（诊断用：确认页面加载的是新版）
   var WS_TAPPED = false;      // WebSocket 截获是否成功挂上
 
   var PORT = (window.__DSH_WORK_BEACON_PORT__ | 0) || 47890;
@@ -27,12 +27,16 @@
   var USAGE_ENDPOINT = "http://127.0.0.1:" + PORT + "/usage";
 
   // ---------------------------------------------------------------- 工作状态
+  // 只有"工具真的在跑"才算工作（data-status=running / data-running / 工具卡片 running）。
+  // data-state="ongoing" 只是"正在生成回合"——纯聊天时也 ongoing，不算工作，
+  // 否则对话期间桌宠会一直判为"工作中"而压掉情绪响应。
   var TOOL_SELECTORS = [
-    '[data-state="ongoing"]',
     '[data-status="running"]',
     '[data-running]',
-    '[data-role="tool"][data-state="running"]'
+    '[data-role="tool"][data-status="running"]',
+    '[data-tool-card="true"][data-status="running"]'
   ];
+  // 思考/加载：既不算"工作"，也不算"纯聊天"（中间态；用于 detail 展示）
   var THINKING_SELECTORS = [
     '[data-state="loading"]',
     '[data-status="pending"]',
@@ -58,8 +62,8 @@
     if (window.__DSH_WORK_BEACON_FORCE__ !== undefined) {
       return { working: !!window.__DSH_WORK_BEACON_FORCE__, detail: "manual" };
     }
+    // 只有工具真的在跑才算"工作"；纯对话/思考/加载都算空闲（供情绪响应触发）
     if (query(TOOL_SELECTORS)) return { working: true, detail: "tool" };
-    if (query(THINKING_SELECTORS)) return { working: true, detail: "thinking" };
     return { working: false, detail: "" };
   }
 

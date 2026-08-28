@@ -272,7 +272,8 @@ class PetApp:
             now = time.monotonic()
             if self._last_react_ts and (now - self._last_react_ts) < self._emotion_react_interval:
                 return
-            fingerprint, text = session_reader.latest_assistant_message(session_file)
+            # 以用户最新一条消息文本触发情绪（对话中的情绪来自用户输入）
+            fingerprint, text = session_reader.latest_user_message(session_file)
             if not fingerprint or not text:
                 return
             if fingerprint == self._last_react_msg:

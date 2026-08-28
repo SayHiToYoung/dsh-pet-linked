@@ -36,6 +36,7 @@ EMOTION_ACTIONS: dict[str, list[str]] = {
     "playful":  ["偷吃零食被抓住", "原地敲击桌面互动", "原地蹲下玩玩具汽车"],
     "excited":  ["原地跳跃抓碎头顶物品", "可爱宅舞", "小幅度原地360度旋转展示"],
     "gaming":   ["玩游戏气急败坏", "下五子棋", "玩水枪"],
+    "tease":    ["傲娇生气", "用鲸鱼尾巴拍打地面", "原地重力下蹲压缩", "偷吃零食被抓住"],
     "neutral":  ["待机呼吸休闲", "悠闲哼歌"],
 }
 
@@ -76,6 +77,7 @@ KEYWORD_RULES: list[tuple[tuple[str, ...], str, float]] = [
     (("思考", "想想", "考虑", "大概", "也许", "应该", "可能", "琢磨", "纠结"), "thinking", 0.6),
     (("玩", "游戏", "摸鱼", "摆烂", "划水", "发呆", "无聊", "偷懒"), "playful", 0.8),
     (("写代码", "代码", "bug", "重构", "提交", "写代码", "开发"), "writing", 0.7),
+    (("肥", "胖", "笨蛋", "傻瓜", "蠢", "呆子", "憨", "蠢货", "大肥鱼"), "tease", 1.0),
 ]
 
 # 高情绪：置信度足够也会升级 LLM 精调
@@ -180,8 +182,13 @@ def escalate_with_llm(text: str, config, api_key: str) -> str | None:
 
 
 def decide_action(text: str, config=None, api_key: str = "") -> tuple[str, str]:
-    """混合决策：返回 (实际动画名 或 None, 来源 "local"/"llm"/"none")。"""
+    """混合决策：返回 (实际动画名 或 None, 来源 "local"/"llm"/"none")。
+
+    中性（无情绪信号）→ 不反应；有情绪才本地或 LLM 出动作。
+    """
     emotion, confidence = detect_emotion_local(text)
+    if emotion == "neutral":
+        return None, "none"
     if not needs_llm(emotion, confidence):
         action = pick_action_local(emotion)
         return action, "local"

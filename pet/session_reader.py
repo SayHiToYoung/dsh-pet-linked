@@ -147,9 +147,54 @@ _AGG_CACHE: dict = {}
 def latest_assistant_message(path: Path) -> tuple[str, str]:
     """返回最新一条 assistant 文本消息的 (指纹, 文本)。
 
-    指纹用 (turn, step)；用于检测"出现了新回合"，触发情绪动作。
+    指纹用 (turn, step, seq)；用于检测"出现了新回合"，触发情绪动作。
     找不到返回 ("", "")。
     """
+    return _latest_message(path, "assistant/message")
+
+
+def latest_user_message(path: Path) -> tuple[str, str]:
+    """返回最新一条 user 文本消息（排除纯工具结果）的 (指纹, 文本)。"""
+    return _latest_message(path, "user/message")
+
+
+def _extract_blocks_text(content) -> str:
+    """从 content（str 或 block 列表）提取纯文本（只取 text 块）。"""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        pieces = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                pieces.append(str(block.get("text") or ""))
+        return "".join(pieces).strip()
+    return ""
+
+
+# 系统注入内容特征（开头的 PERSONA_LOAD / 运行时上下文 / 技能提醒等，不是真实对话）
+_SYSTEM_HINTS = ("[PERSONA_LOAD]", "Current runtime context", "<system-reminder>",
+                 "Approval policy:", "Current DSH file policy")
+
+
+def _data_text(data) -> str:
+    """从事件 data 里提取文本：助手在 data.message.content，用户在 data.content。"""
+    if not isinstance(data, dict):
+        return ""
+    # 助手消息：data.message.content
+    msg = data.get("message")
+    if isinstance(msg, dict):
+        t = _extract_blocks_text(msg.get("content"))
+        if t:
+            return t
+    # 用户消息：data.content
+    t = _extract_blocks_text(data.get("content"))
+    if t and not any(hint in t for hint in _SYSTEM_HINTS):
+        return t
+    return ""
+
+
+def _latest_message(path: Path, event_type: str) -> tuple[str, str]:
+    """扫描会话日志，返回指定事件类型的最后一条含文本消息 (指纹, 文本)。"""
     fingerprint = ""
     text = ""
     try:
@@ -163,26 +208,18 @@ def latest_assistant_message(path: Path) -> tuple[str, str]:
             ev = json.loads(line)
         except Exception:
             continue
-        data = ev.get("data") if isinstance(ev, dict) else None
-        if not isinstance(data, dict) or data.get("type") != "assistant/message":
+        if ev.get("type") != event_type:
+            continue
+        data = ev.get("data")
+        if not isinstance(data, dict):
             continue
         turn, step = data.get("turn"), data.get("step")
-        if turn is None or step is None:
-            continue
-        msg = data.get("message")
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        pieces = []
-        if isinstance(content, str):
-            pieces.append(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    pieces.append(str(block.get("text") or ""))
-        joined = "".join(pieces).strip()
+        seq = ev.get("seq")
+        if seq is None:
+            seq = ev.get("seq0")
+        joined = _data_text(data)
         if joined:
-            fingerprint = f"{turn}:{step}"
+            fingerprint = f"{turn}:{step}:{seq}"
             text = joined
     return fingerprint, text
 
