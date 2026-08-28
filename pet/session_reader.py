@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import zstandard
 from pathlib import Path
 
@@ -222,6 +223,67 @@ def _latest_message(path: Path, event_type: str) -> tuple[str, str]:
             fingerprint = f"{turn}:{step}:{seq}"
             text = joined
     return fingerprint, text
+
+
+# 密钥/长串 token 特征（避免把 API key 等敏感内容当情绪文本处理/记录）
+_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9_\-]{8,}\b", re.IGNORECASE)
+_LONG_TOKEN_RE = re.compile(r"\b[A-Za-z0-9_\-]{32,}\b")
+
+
+def _looks_like_secret(text: str) -> bool:
+    return bool(_SECRET_RE.search(text)) or bool(_LONG_TOKEN_RE.search(text))
+
+
+def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]:
+    """扫描所有会话，返回全局最新一条用户文本消息 (session_id, fingerprint, text)。
+
+    用消息的 time 字段比较（跨会话 seq 不可比）；过滤系统注入与密钥。
+    避免"最新会话交替"导致的重复触发。找不到返回 ("", "", "")。
+    """
+    base = root or sessions_root()
+    best = None  # (time, session_id, fingerprint, text)
+    if not base.is_dir():
+        return "", "", ""
+    try:
+        for ws in base.iterdir():
+            if not ws.is_dir():
+                continue
+            for sess in ws.iterdir():
+                f = sess / "session.jsonl.zstd"
+                if not f.is_file():
+                    continue
+                sid = _session_id_of(f)
+                try:
+                    raw = f.read_bytes()
+                except OSError:
+                    continue
+                for line in _decompress_all(raw).splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    if ev.get("type") != "user/message":
+                        continue
+                    data = ev.get("data")
+                    if not isinstance(data, dict):
+                        continue
+                    text = _data_text(data)
+                    if not text or _looks_like_secret(text):
+                        continue
+                    seq = ev.get("seq")
+                    if seq is None:
+                        seq = ev.get("seq0")
+                    ts = ev.get("time", 0)
+                    fingerprint = f"{sid}:{seq}"
+                    if best is None or ts > best[0]:
+                        best = (ts, sid, fingerprint, text)
+    except OSError:
+        pass
+    if best is None:
+        return "", "", ""
+    return best[1], best[2], best[3]
 
 
 def aggregate_all_sessions(root: Path | None = None) -> dict:

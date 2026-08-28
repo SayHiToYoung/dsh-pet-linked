@@ -179,6 +179,7 @@ class PetApp:
         self._last_react_msg: str = ""
         self._last_react_ts: float = 0.0
         self._emotion_react_interval: float = 15.0
+        self._seen_react_fps: set = set()
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -273,12 +274,15 @@ class PetApp:
             now = time.monotonic()
             if self._last_react_ts and (now - self._last_react_ts) < self._emotion_react_interval:
                 return
-            # 以用户最新一条消息文本触发情绪（对话中的情绪来自用户输入）
-            fingerprint, text = session_reader.latest_user_message(session_file)
+            # 以全局最新一条用户消息触发情绪（跨会话稳定，避免多会话交替导致重复）
+            session_id, fingerprint, text = session_reader.latest_user_message_global()
             if not fingerprint or not text:
                 return
-            if fingerprint == self._last_react_msg:
+            if fingerprint in self._seen_react_fps:
                 return
+            self._seen_react_fps.add(fingerprint)
+            if len(self._seen_react_fps) > 500:  # 防内存无限增长
+                self._seen_react_fps = set(list(self._seen_react_fps)[-300:])
             self._last_react_msg = fingerprint
             self._last_react_ts = now
             self._react_to_text(text, f"log:{fingerprint}")
