@@ -21,13 +21,17 @@
 - 桌宠 `_pick_next` 增加工作态分支：只播「工作池动画 + 待机」，不移动、不闲聊
 - 开工/收工有气泡反馈
 
-### Token 花费统计（DSH 驱动）
-- 信标包装 `window.WebSocket`，截获 DSH 事件流里的 usage
-  （`assistant/message` / `assistant/chunk`），按 `(turn,step)` 去重
-- 模型名取自 `message.source.model`，按实际模型自动选定价档
+### Token 花费统计（直读 DSH 会话日志）
+- **权威数据源**：直接解析 DSH 落盘的会话日志
+  `~/.dsh/sessions/*/session-*/session.jsonl.zstd`（追加式 zstd 多帧，快速解压），
+  每 5 秒后台刷新，跨重启幂等、断线可补账——不依赖页面/信标
+- **双口径**：本会话 = 当前工作区最新会话；累计 = 所有工作区全部会话总账
+- 逐回合提取 usage（输入/输出/缓存命中/推理）与模型名，按实际模型自动选定价档
   （`deepseek-v4-flash` / `deepseek-chat` / `deepseek-reasoner`）
-- 花费估算 = token × 单价（USD/百万）× 汇率 7.2；累计持久化到 `token_usage.json`
-- 托盘 / 右键菜单「Token 花费统计」气泡展示
+- 花费估算 = token × 单价（USD/百万）× 汇率 7.2；快照持久化到 `token_ledger.json`
+- **可自定义显示**：右键/托盘 →「Token 花费设置」，勾选要显示的数据、口径、数字格式
+  （万·亿 / K·M / 完整），保存即预览
+- 托盘 / 右键菜单「Token 花费统计」气泡展示（紧凑数字，不撑爆文本框）
 
 ### 易用性
 - `scripts/make-app.sh` 一键生成「联动桌宠.app」访达/Dock 启动器（带鲸鱼图标）
