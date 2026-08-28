@@ -28,6 +28,26 @@ def sessions_root() -> Path:
     return Path(env) if env else DEFAULT_SESSIONS_ROOT
 
 
+def _encode_workspace(path_str: str) -> str:
+    """把工作区绝对路径编码为 DSH 会话目录名：/Users/x/DeepSeek -> --Users-x-DeepSeek--"""
+    p = str(path_str).strip("/")
+    return "--" + p.replace("/", "-") + "--"
+
+
+def workspace_dir() -> Path:
+    """桌宠所在的 DSH 工作区（= 仓库根目录的上一级，可用 DSH_WORKSPACE 覆盖）。
+
+    情绪响应只扫这个工作区的会话，避免别的项目/工作区的会话互相干扰。
+    """
+    env = os.environ.get("DSH_WORKSPACE")
+    if env:
+        base = Path(env)
+        if base.is_dir():
+            return base
+    repo_parent = Path(__file__).resolve().parents[2]  # /Users/yuyangwei/DeepSeek
+    return sessions_root() / _encode_workspace(str(repo_parent))
+
+
 def _session_id_of(path: Path) -> str:
     """从 session-<uuid>/session.jsonl.zstd 提取 session id。"""
     return path.parent.name
@@ -234,21 +254,31 @@ def _looks_like_secret(text: str) -> bool:
     return bool(_SECRET_RE.search(text)) or bool(_LONG_TOKEN_RE.search(text))
 
 
-def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]:
-    """扫描所有会话，返回全局最新一条用户文本消息 (session_id, fingerprint, text)。
-
-    用消息的 time 字段比较（跨会话 seq 不可比）；过滤系统注入与密钥。
-    避免"最新会话交替"导致的重复触发。找不到返回 ("", "", "")。
-    """
-    base = root or sessions_root()
-    best = None  # (time, session_id, fingerprint, text)
+def _workspace_dirs(base: Path) -> list[Path]:
+    """把 base 归一化为工作区目录列表（兼容 sessions 根 与 单个工作区目录）。"""
     if not base.is_dir():
-        return "", "", ""
-    try:
-        for ws in base.iterdir():
-            if not ws.is_dir():
-                continue
+        return []
+    # 直接包含 session-* 子目录 → 就是单个工作区目录
+    if any(p.is_dir() and p.name.startswith("session-") for p in base.iterdir()):
+        return [base]
+    # 否则是 sessions 根 → 下面全是工作区目录
+    return [p for p in base.iterdir() if p.is_dir()]
+
+
+def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]:
+    """扫描（当前工作区的）所有会话，返回最新一条用户文本消息 (session_id, fingerprint, text)。
+
+    默认只扫桌宠所在工作区（workspace_dir()），避免别的项目会话干扰；
+    用消息的 time 字段比较（跨会话 seq 不可比）；过滤系统注入与密钥。
+    找不到返回 ("", "", "")。
+    """
+    base = root or workspace_dir()
+    best = None  # (time, session_id, fingerprint, text)
+    for ws in _workspace_dirs(base):
+        try:
             for sess in ws.iterdir():
+                if not sess.is_dir():
+                    continue
                 f = sess / "session.jsonl.zstd"
                 if not f.is_file():
                     continue
@@ -279,8 +309,8 @@ def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]
                     fingerprint = f"{sid}:{seq}"
                     if best is None or ts > best[0]:
                         best = (ts, sid, fingerprint, text)
-    except OSError:
-        pass
+        except OSError:
+            continue
     if best is None:
         return "", "", ""
     return best[1], best[2], best[3]
