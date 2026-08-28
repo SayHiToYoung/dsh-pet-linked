@@ -49,6 +49,7 @@ from .context_menu import populate_context_menu as _populate_context_menu
 from .context_menus.shared import take_deferred_menu_callbacks
 from . import vision as vision_mod
 from . import physics as physics_mod
+from . import token_cost as token_cost_mod
 
 
 def _resolve_self_talk_image_dir(raw: str) -> str:
@@ -238,6 +239,18 @@ class PetWindow(QWidget):
         self._self_talk_timer = QTimer(self)
         self._self_talk_timer.setSingleShot(True)
         self._self_talk_timer.timeout.connect(self._on_self_talk_timeout)
+
+        # ---- DSH 工作状态联动（二次开发新增）----
+        # work_state=True 表示 DSH 正在跑工具/回合进行中，桌宠切"认真工作"动画
+        self.work_state: bool = False
+        self.work_detail: str = ""
+
+        # ---- Token 花费统计（二次开发新增，DSH 驱动）----
+        # session = 本次进程累计；lifetime = 跨重启持久累计（config 目录 token_usage.json）
+        # token_model = 最近一次 DSH 上报的模型名
+        self.token_session: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+        self.token_lifetime: dict = token_cost_mod.load_lifetime(self._token_usage_path())
+        self.token_model: str = ""
 
         # ---- 窗口属性：无边框 + 透明 + 不进任务栏；置顶可配置 ----
         flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool
@@ -776,7 +789,11 @@ class PetWindow(QWidget):
         """动画链：30% 待机 / 10% 转向 / 40% 动作 / 20% 移动（空间不够回退动作）。
 
         「不移动」模式下跳过移动分支，其概率并入动作 → 30% 待机 / 10% 转向 / 60% 动作。
+        DSH 工作联动（二次开发）：work_state=True 时只播"工作池 + 待机"，绝不移动、不乱跑。
         """
+        if self.work_state:
+            self._switch(self._pick(self._work_pool() + self.idles, exclude=self.anim))
+            return
         roll = random.random()
         if roll < catalog.P_IDLE:
             if self.idles:
@@ -798,6 +815,81 @@ class PetWindow(QWidget):
     def _pick(pool: list[str], exclude: str | None = None) -> str:
         entries = [n for n in pool if n != exclude] or pool
         return random.choice(entries)
+
+    # ================================================================ DSH 工作状态联动
+    # 工作池关键词：命中即视为"认真工作"专属动画；按当前形象实际拥有的动画过滤。
+    WORK_POOL_KEYWORDS = ('写代码', '吃Token', '敲击桌面', '深度思考', '轻快记录', '专心玩魔方')
+
+    def _work_pool(self) -> list[str]:
+        """工作时优先播的动画池（按当前形象实际拥有过滤；没有则退回随机池）。"""
+        pool = [n for n in self.acts if any(k in n for k in self.WORK_POOL_KEYWORDS)]
+        return pool or self.acts
+
+    def set_work_state(self, working: bool, detail: str = "") -> None:
+        """DSH 工作状态联动入口：由 app 层（信标接收端）调用。"""
+        working = bool(working)
+        detail = str(detail or "")
+        if working == self.work_state and detail == self.work_detail:
+            return
+        self.work_state = working
+        self.work_detail = detail
+        if working:
+            self.show_bubble("收到开工信号，认真写代码啦！💻", duration_ms=2400)
+            self._switch(self._pick(self._work_pool(), exclude=self.anim))
+        else:
+            self.show_bubble("收工！摸鱼模式开启～🐋", duration_ms=2400)
+            self._pick_next()
+
+    # ================================================================ Token 花费统计（DSH 驱动）
+    def _token_usage_path(self) -> Path:
+        return Path(self.cfg.dir) / "token_usage.json"
+
+    # 模型名来自 DSH 事件流（信标上报），桌宠不读自身 API 配置。
+    # 还没收到模型时用默认档估算。
+    DEFAULT_MODEL = "deepseek-chat"
+
+    def _active_model(self) -> str:
+        return self.token_model or self.DEFAULT_MODEL
+
+    def add_token_usage(self, added: dict) -> None:
+        """信标上报的 token 增量 + 模型名（全部来自 DSH 会话）→ 累计 session + lifetime。"""
+        if not isinstance(added, dict):
+            return
+        model = str(added.get("model") or "").strip()
+        if model:
+            self.token_model = model
+        touched = False
+        for key in ("input", "output", "cacheRead", "reasoning"):
+            value = int(added.get(key, 0) or 0)
+            if value > 0:
+                self.token_session[key] += value
+                self.token_lifetime[key] += value
+                touched = True
+        if touched:
+            token_cost_mod.save_lifetime(self._token_usage_path(), self.token_lifetime)
+
+    def token_cost_text(self) -> str:
+        """格式化当前累计：本会话 + 累计（估算人民币，模型来自 DSH）。"""
+        model = self._active_model()
+        pricing = token_cost_mod.pricing_for_model(model)
+        s = self.token_session
+        l = self.token_lifetime
+        s_cost = token_cost_mod.estimate_cost_cny(
+            s["input"], s["output"], s["cacheRead"], s["reasoning"], pricing)
+        l_cost = token_cost_mod.estimate_cost_cny(
+            l["input"], l["output"], l["cacheRead"], l["reasoning"], pricing)
+        lines = [
+            "本会话 Token 花费（估算）",
+            f"模型 {model}",
+            f"输入 {s['input']:,} · 缓存 {s['cacheRead']:,} · 输出 {s['output']:,}",
+            f"≈ ¥{s_cost:.2f}",
+            f"累计（桌宠记录）≈ ¥{l_cost:.2f}",
+        ]
+        return "\n".join(lines)
+
+    def show_token_cost(self) -> None:
+        """托盘/菜单入口：气泡展示 Token 花费统计。"""
+        self.show_bubble(self.token_cost_text(), duration_ms=7000)
 
     # ================================================================ 移动
     def _try_move(self, name: str | None = None) -> bool:
@@ -1174,6 +1266,10 @@ class PetWindow(QWidget):
         return True
 
     def _on_self_talk_timeout(self) -> None:
+        if self.work_state:
+            # 工作中保持安静：不闲聊、不打扰（二次开发新增）
+            self._schedule_self_talk()
+            return
         displayed = False
         if self._self_talk_enabled and self.isVisible():
             displayed = self._show_random_self_talk()

@@ -71,6 +71,7 @@ def build_modern_menu(menu: QMenu, pet, template: dict) -> None:
     # 4. 工具：同样直接显示，避免为了两个动作增加一级导航。
     start_group()
     add_balance(menu, pet)
+    add_action(menu, "Token 花费统计", "tools", lambda: pet.show_token_cost(), close_on_trigger=True)
     add_harness(menu, pet)
     add_deepseek_web(menu)
     add_quick_launch_menu(menu, pet.cfg)

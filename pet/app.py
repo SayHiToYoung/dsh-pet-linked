@@ -30,6 +30,7 @@ from .harness_launcher import launch_harness_gui
 from .instance_launcher import launch_new_pet
 from .library import MovieLibrary
 from .window import PetWindow
+from .work_state import WorkStateServer
 from .fun_image_popup import restore_ojingjing_windows
 from .runtime_cleanup import cleanup_stale_runtime_dirs
 
@@ -72,6 +73,35 @@ class _UpdateBridge(_BackgroundResult):
                 "可从“更新与帮助”打开项目页下载。",
                 duration_ms=9000,
             )
+
+
+class _WorkStateBridge(QObject):
+    """把 HTTP 接收线程里的工作状态/用量变化安全投递到 Qt 主线程。"""
+
+    changed = Signal(bool, str)
+    usage_changed = Signal(object)
+
+    def __init__(self, controller) -> None:
+        super().__init__()
+        self.controller = controller
+        self.changed.connect(self._apply)
+        self.usage_changed.connect(self._apply_usage)
+
+    def _apply(self, working: bool, detail: str) -> None:
+        win = self.controller.win
+        if win is not None:
+            try:
+                win.set_work_state(working, detail)
+            except Exception:
+                logging.exception("work_state 应用失败")
+
+    def _apply_usage(self, added: dict) -> None:
+        win = self.controller.win
+        if win is not None:
+            try:
+                win.add_token_usage(added)
+            except Exception:
+                logging.exception("token usage 应用失败")
 
 
 def _setup_logging(config: Config) -> None:
@@ -129,6 +159,8 @@ class PetApp:
         self._balance_timer = QTimer()
         self._balance_timer.timeout.connect(self.show_balance)
         self._update_bridge = None
+        self._work_bridge = _WorkStateBridge(self)
+        self._work_server: WorkStateServer | None = None
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -137,7 +169,42 @@ class PetApp:
         self._create_ui(character_id)
         self._apply_spawn_offset()
         self._apply_balance_timer()
+        self._start_work_state()
         QTimer.singleShot(3500, self._check_autostart_wanted)
+
+    # ------------------------------------------------------------ DSH 工作状态联动
+    def _start_work_state(self) -> None:
+        """启动信标接收端：页内信标把 DSH 是否正在干活 POST 到本进程。"""
+        if self._work_server is not None:
+            return
+        self.app.aboutToQuit.connect(self._stop_work_state)
+        server = WorkStateServer(
+            on_change=self._on_work_state_change,
+            on_usage=self._on_usage_change,
+        )
+        if server.start():
+            self._work_server = server
+            if self.win is not None:
+                self.win.show_bubble(
+                    f"已连接工作状态信标（127.0.0.1:{server.port}）",
+                    duration_ms=3200,
+                )
+        else:
+            if self.win is not None:
+                self.win.show_bubble("工作状态信标端口被占用，本次不联动", duration_ms=3200)
+
+    def _on_work_state_change(self, working: bool, detail: str) -> None:
+        # HTTP 线程 → Qt 主线程（Signal 队列投递）
+        self._work_bridge.changed.emit(working, detail)
+
+    def _on_usage_change(self, added: dict) -> None:
+        # HTTP 线程 → Qt 主线程（Signal 队列投递）
+        self._work_bridge.usage_changed.emit(added)
+
+    def _stop_work_state(self) -> None:
+        if self._work_server is not None:
+            self._work_server.stop()
+            self._work_server = None
 
     def _set_autostart(self, enabled: bool, win=None) -> bool:
         ok = autostart_mod.set_enabled(bool(enabled))
@@ -523,6 +590,7 @@ class PetApp:
         menu.addSeparator()
         if self.enable_chat:
             menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
+        menu.addAction('Token 花费统计', lambda: win.show_token_cost())
         menu.addAction('检查更新', lambda: self.check_update(win))
         menu.addAction('启动 DeepSeek Harness', lambda: launch_harness_gui(win))
         menu.addAction('退出', self.app.quit)
@@ -569,6 +637,24 @@ def _mac_set_dock_icon_visible(visible: bool) -> None:
         pass
 
 
+def _set_app_icon(app) -> None:
+    """设置应用/Dock 图标为鲸鱼娘图标，避免源码运行时显示成 Python 图标。
+
+    macOS 上 QApplication.setWindowIcon 即 Dock 图标；优先用内置 icon.icns。
+    """
+    from PySide6.QtGui import QIcon
+
+    try:
+        icon_path = Path(__file__).resolve().parent.parent / "assets" / "icon.icns"
+        if icon_path.is_file():
+            app.setWindowIcon(QIcon(str(icon_path)))
+            return
+        # 回退：内置图标缺失时至少设置一个占位，避免纯 Python 图标
+        app.setWindowIcon(QIcon.fromTheme("applications-games"))
+    except Exception:
+        pass
+
+
 def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName(APP_DIR_NAME)
@@ -576,6 +662,7 @@ def main(argv: list[str] | None = None, enable_chat: bool = True) -> int:
 
     config = Config()
     _mac_set_dock_icon_visible(bool(config.get("show_dock_icon", True)))
+    _set_app_icon(app)  # 在激活策略之后设图标，避免被重置
     _setup_logging(config)
     logging.info('dsh-pet-standalone 启动')
     _cleanup_stale_runtime_dirs()

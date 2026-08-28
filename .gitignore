@@ -4,6 +4,17 @@ __pycache__/
 .pytest_cache/
 .DS_Store
 
+# ---- 二次开发新增的本地运行时产物（不随仓库发布）----
+# 本地虚拟环境 / 运行日志 / pid / 调试日志
+.venv/
+.run/
+# 信标注入备份
+.beacon-backup/
+# 下载的发布包
+releases/
+# 访达 App（用 scripts/make-app.sh 重新生成）
+联动桌宠.app/
+
 # 运行时产物
 tmp_appdata/
 tests/_tmp_*/
@@ -27,6 +38,8 @@ assets/prompt/
 
 # Windows 安装包图标（本地生成，入库保证克隆后可构建）
 !assets/icon.ico
+# 鲸鱼 Dock 图标（二次开发：源码运行时的应用/Dock 图标，入库保证克隆后可运行）
+!assets/icon.icns
 
 # PyInstaller 构建产物
 build/
