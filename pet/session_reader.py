@@ -144,6 +144,49 @@ def read_session_usage(path: Path) -> tuple[str, dict, str]:
 _AGG_CACHE: dict = {}
 
 
+def latest_assistant_message(path: Path) -> tuple[str, str]:
+    """返回最新一条 assistant 文本消息的 (指纹, 文本)。
+
+    指纹用 (turn, step)；用于检测"出现了新回合"，触发情绪动作。
+    找不到返回 ("", "")。
+    """
+    fingerprint = ""
+    text = ""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return fingerprint, text
+    for line in _decompress_all(raw).splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        data = ev.get("data") if isinstance(ev, dict) else None
+        if not isinstance(data, dict) or data.get("type") != "assistant/message":
+            continue
+        turn, step = data.get("turn"), data.get("step")
+        if turn is None or step is None:
+            continue
+        msg = data.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        pieces = []
+        if isinstance(content, str):
+            pieces.append(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    pieces.append(str(block.get("text") or ""))
+        joined = "".join(pieces).strip()
+        if joined:
+            fingerprint = f"{turn}:{step}"
+            text = joined
+    return fingerprint, text
+
+
 def aggregate_all_sessions(root: Path | None = None) -> dict:
     """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。"""
     base = root or sessions_root()

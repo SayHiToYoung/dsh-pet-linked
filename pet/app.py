@@ -32,6 +32,7 @@ from .library import MovieLibrary
 from .window import PetWindow
 from .work_state import WorkStateServer
 from . import session_reader
+from . import emotion_actor
 from .fun_image_popup import restore_ojingjing_windows
 from .runtime_cleanup import cleanup_stale_runtime_dirs
 
@@ -81,12 +82,14 @@ class _WorkStateBridge(QObject):
 
     changed = Signal(bool, str)
     ledger_changed = Signal(str, object, object, str)
+    emotion_action = Signal(str)
 
     def __init__(self, controller) -> None:
         super().__init__()
         self.controller = controller
         self.changed.connect(self._apply)
         self.ledger_changed.connect(self._apply_ledger)
+        self.emotion_action.connect(self._apply_emotion_action)
 
     def _apply(self, working: bool, detail: str) -> None:
         win = self.controller.win
@@ -103,6 +106,14 @@ class _WorkStateBridge(QObject):
                 win.update_ledger(session_id, current_totals, total_totals, model)
             except Exception:
                 logging.exception("token ledger 应用失败")
+
+    def _apply_emotion_action(self, action: str) -> None:
+        win = self.controller.win
+        if win is not None:
+            try:
+                win.react_to_emotion(action)
+            except Exception:
+                logging.exception("emotion action 应用失败")
 
 
 def _setup_logging(config: Config) -> None:
@@ -164,6 +175,10 @@ class PetApp:
         self._work_server: WorkStateServer | None = None
         self._ledger_timer: QTimer | None = None
         self._ledger_busy = False
+        # 情绪响应状态
+        self._last_react_msg: str = ""
+        self._last_react_ts: float = 0.0
+        self._emotion_react_interval: float = 15.0
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -236,10 +251,49 @@ class PetApp:
             else:
                 sid, current_totals, model = session_reader.read_session_usage(session_file)
             self._work_bridge.ledger_changed.emit(sid, current_totals, total_totals, model)
+            # 情绪响应：新回合 + 空闲 + 节流 → 本地/LLM 决策动作
+            if session_file is not None:
+                self._maybe_emotion_react(session_file)
         except Exception:
             logging.exception("会话日志账本解析失败")
         finally:
             self._ledger_busy = False
+
+    # ------------------------------------------------------------ 情绪响应
+    def _maybe_emotion_react(self, session_file) -> None:
+        try:
+            if not bool(self.config.get("emotion_reactions_enabled", True)):
+                return
+            # 仅空闲时响应（DSH 没在跑任务）
+            server = self._work_server
+            if server is not None and server.working:
+                return
+            # 节流：两次响应至少间隔 N 秒
+            now = time.monotonic()
+            if self._last_react_ts and (now - self._last_react_ts) < self._emotion_react_interval:
+                return
+            fingerprint, text = session_reader.latest_assistant_message(session_file)
+            if not fingerprint or not text:
+                return
+            if fingerprint == self._last_react_msg:
+                return
+            self._last_react_msg = fingerprint
+            self._last_react_ts = now
+            # 混合决策：本地为主，必要时 LLM 升级
+            provider = None
+            api_key = ""
+            try:
+                settings = self.config.chat_settings()
+                provider = settings.active_config
+                api_key = self.config.resolve_api_key(provider)
+            except Exception:
+                provider = None
+            action, source = emotion_actor.decide_action(text, provider, api_key)
+            if action:
+                logging.info("情绪响应 [%s]: %s <- %s", source, action, fingerprint)
+                self._work_bridge.emotion_action.emit(action)
+        except Exception:
+            logging.exception("情绪响应判断失败")
 
     def _set_autostart(self, enabled: bool, win=None) -> bool:
         ok = autostart_mod.set_enabled(bool(enabled))

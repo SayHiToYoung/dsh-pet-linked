@@ -843,6 +843,15 @@ class PetWindow(QWidget):
             self.show_bubble("收工！摸鱼模式开启～🐋", duration_ms=2400)
             self._pick_next()
 
+    def react_to_emotion(self, action: str) -> None:
+        """播放情绪动作（由 app 层根据对话情绪触发；工作态不打断）。"""
+        if not action or self.work_state:
+            return
+        names = self.lib.names()
+        if action not in names:
+            return
+        self._switch(action)
+
     # ================================================================ Token 花费统计（DSH 会话日志驱动）
     def _token_usage_path(self) -> Path:
         return Path(self.cfg.dir) / "token_ledger.json"
