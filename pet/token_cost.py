@@ -68,6 +68,34 @@ def estimate_cost_cny(input_t: int, output_t: int, cache_read: int = 0,
     return round(usd * EXCHANGE_RATE, 4)
 
 
+def format_number(n, style: str = "auto") -> str:
+    """把大数字压成适合气泡显示的短格式。
+
+    style:
+      "auto" -> 中文习惯 万/亿（默认，避免撑爆文本框）
+      "km"   -> 1.2K / 3.4M
+      "full" -> 完整千分位 1,816,883
+    """
+    try:
+        value = int(n or 0)
+    except (TypeError, ValueError):
+        value = 0
+    if style == "full":
+        return f"{value:,}"
+    if style == "km":
+        if value >= 1_000_000:
+            return f"{value / 1_000_000:.2f}M"
+        if value >= 1_000:
+            return f"{value / 1_000:.1f}K"
+        return str(value)
+    # auto: 万/亿
+    if value >= 100_000_000:
+        return f"{value / 100_000_000:.2f}亿"
+    if value >= 10_000:
+        return f"{value / 10_000:.1f}万"
+    return f"{value:,}"
+
+
 def load_lifetime(path: Path) -> dict:
     """读取持久化的累计用量（不存在返回空）。"""
     try:

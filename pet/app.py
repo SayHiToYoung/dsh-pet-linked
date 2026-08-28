@@ -626,6 +626,7 @@ class PetApp:
         if self.enable_chat:
             menu.addAction('DeepSeek 余额', lambda: self.show_balance(win))
         menu.addAction('Token 花费统计', lambda: win.show_token_cost())
+        menu.addAction('Token 花费设置', lambda: win.open_token_cost_settings())
         menu.addAction('检查更新', lambda: self.check_update(win))
         menu.addAction('启动 DeepSeek Harness', lambda: launch_harness_gui(win))
         menu.addAction('退出', self.app.quit)

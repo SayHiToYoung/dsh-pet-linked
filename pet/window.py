@@ -919,24 +919,59 @@ class PetWindow(QWidget):
         """（兼容旧信标路径，已由会话日志驱动取代；保留为空操作避免误调用。）"""
         return
 
+    # ---- 显示设置（config.json，token_display_*）----
+    _FIELD_LABELS = {
+        "input": "输入",
+        "output": "输出",
+        "cacheRead": "命中",
+        "reasoning": "推理",
+        "price": "价格",
+    }
+    _SCOPE_LABELS = {"session": "本会话", "lifetime": "累计"}
+
+    def _display_settings(self) -> tuple[list, list, str]:
+        cfg = self.cfg
+        fields = cfg.get("token_display_fields", ["input", "output", "cacheRead", "price"])
+        scopes = cfg.get("token_display_scopes", ["session", "lifetime"])
+        fmt = cfg.get("token_display_format", "auto")
+        return fields, scopes, fmt
+
     def token_cost_text(self) -> str:
-        """格式化当前累计：本会话 + 累计，只显示 输入/输出/命中/价格 四项。"""
+        """按用户设置生成紧凑气泡文本（数字自动压成 万/亿 等）。"""
+        fields, scopes, fmt = self._display_settings()
+        if not fields or not scopes:
+            return "（没有要显示的数据，可在「Token 花费设置」里勾选）"
         pricing = token_cost_mod.pricing_for_model(self._active_model())
-        s = self.token_session
-        l = self.token_lifetime
-        s_cost = token_cost_mod.estimate_cost_cny(
-            s["input"], s["output"], s["cacheRead"], s["reasoning"], pricing)
-        l_cost = token_cost_mod.estimate_cost_cny(
-            l["input"], l["output"], l["cacheRead"], l["reasoning"], pricing)
-        lines = [
-            f"本会话：输入 {s['input']:,} · 输出 {s['output']:,} · 命中 {s['cacheRead']:,} · ¥{s_cost:.2f}",
-            f"累计：输入 {l['input']:,} · 输出 {l['output']:,} · 命中 {l['cacheRead']:,} · ¥{l_cost:.2f}",
-        ]
-        return "\n".join(lines)
+        tokens = {"session": self.token_session, "lifetime": self.token_lifetime}
+        lines = []
+        for scope in scopes:
+            if scope not in tokens:
+                continue
+            tot = tokens[scope]
+            label = self._SCOPE_LABELS.get(scope, scope)
+            parts = []
+            for key in fields:
+                if key == "price":
+                    cost = token_cost_mod.estimate_cost_cny(
+                        tot["input"], tot["output"], tot["cacheRead"], tot["reasoning"], pricing)
+                    parts.append(f"¥{cost:.2f}")
+                elif key in tot:
+                    parts.append(f"{self._FIELD_LABELS.get(key, key)} {token_cost_mod.format_number(tot[key], fmt)}")
+            if parts:
+                lines.append(f"{label}：{' · '.join(parts)}")
+        return "\n".join(lines) if lines else "（没有要显示的数据）"
 
     def show_token_cost(self) -> None:
         """托盘/菜单入口：气泡展示 Token 花费统计。"""
         self.show_bubble(self.token_cost_text(), duration_ms=7000)
+
+    def open_token_cost_settings(self, parent=None) -> None:
+        """打开「Token 花费显示设置」窗口。"""
+        from .token_cost_dialog import TokenCostDialog
+        dlg = TokenCostDialog(self.cfg, parent)
+        dlg.exec()
+        # 保存后立刻用新设置展示一次，方便用户预览效果
+        self.show_token_cost()
 
     # ================================================================ 移动
     def _try_move(self, name: str | None = None) -> bool:

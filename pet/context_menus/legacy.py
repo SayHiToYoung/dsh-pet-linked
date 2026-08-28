@@ -56,6 +56,7 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
     menu.addSeparator()
     add_harness(menu, pet, icons=False)
     add_action(menu, "Token 花费统计", None, lambda: pet.show_token_cost(), close_on_trigger=True)
+    add_action(menu, "Token 花费设置", None, lambda: pet.open_token_cost_settings(), close_on_trigger=True)
     add_deepseek_web(menu, icons=False)
 
     menu.addSeparator()
