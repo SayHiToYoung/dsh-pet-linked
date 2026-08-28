@@ -365,6 +365,7 @@ class Config:
             "modern_chat_card_opacity",
             "chat_bg_crops",
             "chat_ui_style",
+            "token_display_fields", "token_display_scopes", "token_display_format",
         ):
             if key in raw and raw[key] is not None:
                 self.data[key] = raw[key]
