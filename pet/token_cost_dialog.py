@@ -16,10 +16,11 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QGroupBox, QHBoxLayout, QHeaderView,
-    QInputDialog, QLabel, QLineEdit, QMessageBox, QPushButton,
+    QInputDialog, QLabel, QLineEdit, QListWidget, QMessageBox, QPushButton,
     QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
+from . import session_reader
 from . import token_cost as token_cost_mod
 
 FIELD_OPTIONS = [
@@ -178,6 +179,15 @@ class TokenCostDialog(QDialog):
         self._hours_edit.setPlaceholderText(DEFAULT_PEAK_HOURS_TEXT)
         hours_row.addWidget(self._hours_edit, 1)
         price_layout.addLayout(hours_row)
+
+        ref_row = QHBoxLayout()
+        ref_label = QLabel("实际用过的模型名（添加模型时请填「真实名的开头」作前缀）：")
+        ref_label.setWordWrap(True)
+        ref_row.addWidget(ref_label, 1)
+        self._model_ref = QListWidget()
+        self._model_ref.setMaximumHeight(64)
+        ref_row.addWidget(self._model_ref, 1)
+        price_layout.addLayout(ref_row)
         root.addWidget(price_box)
 
         # 按钮
@@ -247,6 +257,14 @@ class TokenCostDialog(QDialog):
             self._fill_price_row(row, prefix, overrides)
         for i, prefix in enumerate(self._custom_prefixes):
             self._fill_price_row(len(PRICE_ROWS) + i, prefix, overrides)
+
+        # 实际用过的模型名参考（按前缀 startswith 匹配计价，请照真实名开头填前缀）
+        try:
+            names = session_reader.collect_model_names()
+        except Exception:
+            names = []
+        self._model_ref.clear()
+        self._model_ref.addItems(names or ["（尚未扫描到会话记录）"])
 
     def _fill_price_row(self, row: int, prefix: str, overrides: dict) -> None:
         """把一个模型行填上当前生效价（覆盖合并内置）。"""

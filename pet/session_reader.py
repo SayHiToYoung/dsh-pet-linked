@@ -362,3 +362,71 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict, dict]:
     except OSError:
         pass
     return grand, grand_peak, grand_off
+
+
+# 模型名收集缓存：path -> ((mtime,size), [(model, first_time), ...])
+_MODEL_CACHE: dict = {}
+
+
+def collect_model_names(root: Path | None = None, limit: int = 50) -> list[str]:
+    """收集所有会话日志中出现过的真实模型名（去重，按首次出现时间升序）。
+
+    供设置界面的「添加模型」参考：用户照着真实名的**开头**填前缀，
+    计费时按前缀 startswith 匹配才能命中。带 (mtime,size) 缓存，
+    只有新写入的会话会被重新扫描。
+    """
+    base = root or sessions_root()
+    first_seen: dict[str, float] = {}
+    if base.is_dir():
+        try:
+            for ws in base.iterdir():
+                if not ws.is_dir():
+                    continue
+                for sess in ws.iterdir():
+                    f = sess / "session.jsonl.zstd"
+                    if not f.is_file():
+                        continue
+                    try:
+                        st = f.stat()
+                        stamp = (st.st_mtime, st.st_size)
+                    except OSError:
+                        continue
+                    key = str(f)
+                    cached = _MODEL_CACHE.get(key)
+                    if cached is not None and cached[0] == stamp:
+                        names = cached[1]
+                    else:
+                        names = _scan_model_names(f)
+                        _MODEL_CACHE[key] = (stamp, names)
+                    for name, ts in names:
+                        if name not in first_seen or ts < first_seen[name]:
+                            first_seen[name] = ts
+        except OSError:
+            pass
+    ordered = sorted(first_seen, key=first_seen.get)
+    return ordered[:limit]
+
+
+def _scan_model_names(f: Path) -> list[tuple[str, float]]:
+    """扫描单个会话日志，返回 [(model, first_time_ms), ...]（按出现顺序）。"""
+    out: list[tuple[str, float]] = []
+    try:
+        raw = f.read_bytes()
+    except OSError:
+        return out
+    text = _decompress_all(raw)
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        data = ev.get("data") if isinstance(ev, dict) else None
+        if not isinstance(data, dict):
+            continue
+        msg = data.get("message")
+        if isinstance(msg, dict) and msg.get("source") and msg["source"].get("model"):
+            name = str(msg["source"]["model"])[:120]
+            out.append((name, ev.get("time") or 0))
+    return out
