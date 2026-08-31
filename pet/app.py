@@ -24,10 +24,12 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from . import autostart as autostart_mod
 from . import balance as balance_mod
 from . import catalog
+from . import session_reader
 from . import updater
 from .config import APP_DIR_NAME, Config
 from .harness_launcher import launch_harness_gui
 from .instance_launcher import launch_new_pet
+from .proactive_care import ProactiveCare
 from .library import MovieLibrary
 from .window import PetWindow
 from .work_state import WorkStateServer
@@ -84,6 +86,7 @@ class _WorkStateBridge(QObject):
     # session_id, current_totals, total_totals, model, current_peak, current_off, total_peak, total_off
     ledger_changed = Signal(str, object, object, str, object, object, object, object)
     emotion_action = Signal(str)
+    care_line = Signal(str)  # 主动关怀台词 → 主线程气泡
 
     def __init__(self, controller) -> None:
         super().__init__()
@@ -91,6 +94,7 @@ class _WorkStateBridge(QObject):
         self.changed.connect(self._apply)
         self.ledger_changed.connect(self._apply_ledger)
         self.emotion_action.connect(self._apply_emotion_action)
+        self.care_line.connect(self._apply_care_line)
 
     def _apply(self, working: bool, detail: str) -> None:
         win = self.controller.win
@@ -118,6 +122,15 @@ class _WorkStateBridge(QObject):
                 win.react_to_emotion(action)
             except Exception:
                 logging.exception("emotion action 应用失败")
+
+    def _apply_care_line(self, line: str) -> None:
+        """主动关怀台词 → 气泡（主线程）。"""
+        win = self.controller.win
+        if win is not None and line:
+            try:
+                win.show_bubble(str(line), duration_ms=6000)
+            except Exception:
+                logging.exception("主动关怀气泡失败")
 
 
 def _setup_logging(config: Config) -> None:
@@ -185,6 +198,9 @@ class PetApp:
         self._emotion_react_interval: float = 15.0
         self._seen_react_fps: set = set()
         self._current_sid: str = ""
+        # 主动关怀（久坐/深夜/卡住/欢迎回来）
+        self._care = ProactiveCare(self.config.get("proactive_care_thresholds") or {})
+        self._care_ticks: int = 0
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -266,10 +282,31 @@ class PetApp:
             # 情绪响应：新回合 + 空闲 + 节流 → 本地/LLM 决策动作
             if session_file is not None:
                 self._maybe_emotion_react(session_file)
+            # 主动关怀：每 30 秒节流（2 秒轮询 × 15 次）
+            self._care_ticks += 1
+            if self._care_ticks >= 15:
+                self._care_ticks = 0
+                self._tick_proactive_care(session_file)
         except Exception:
             logging.exception("会话日志账本解析失败")
         finally:
             self._ledger_busy = False
+
+    def _tick_proactive_care(self, session_file) -> None:
+        """推进主动关怀状态机（后台线程）；命中则投递台词到主线程气泡。"""
+        try:
+            if not bool(self.config.get("proactive_care_enabled", True)):
+                return
+            server = self._work_server
+            working = bool(server and server.working)
+            detail = server.detail if server is not None else ""
+            user_ts = session_reader.latest_user_message_time() if session_file is not None else 0.0
+            result = self._care.tick(time.monotonic(), working, detail, user_ts)
+            if result:
+                _, line = result
+                self._work_bridge.care_line.emit(line)
+        except Exception:
+            logging.exception("主动关怀 tick 失败")
 
     # ------------------------------------------------------------ 情绪响应
     def _maybe_emotion_react(self, session_file) -> None:

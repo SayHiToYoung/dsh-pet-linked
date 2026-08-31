@@ -364,6 +364,49 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict, dict]:
     return grand, grand_peak, grand_off
 
 
+def latest_user_message_time(root: Path | None = None) -> float:
+    """全局最新一条用户文本消息的时间戳（毫秒）；无则 0。
+
+    用于主动关怀的「欢迎回来」检测：过滤系统注入与密钥，
+    只认真实对话的用户消息。
+    """
+    base = root or sessions_root()
+    best = 0.0
+    for ws in _workspace_dirs(base):
+        try:
+            for sess in ws.iterdir():
+                if not sess.is_dir():
+                    continue
+                f = sess / "session.jsonl.zstd"
+                if not f.is_file():
+                    continue
+                try:
+                    raw = f.read_bytes()
+                except OSError:
+                    continue
+                for line in _decompress_all(raw).splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except Exception:
+                        continue
+                    if ev.get("type") != "user/message":
+                        continue
+                    data = ev.get("data")
+                    if not isinstance(data, dict):
+                        continue
+                    text = _data_text(data)
+                    if not text or _looks_like_secret(text):
+                        continue
+                    ts = ev.get("time", 0)
+                    if ts > best:
+                        best = ts
+        except OSError:
+            continue
+    return best
+
+
 # 模型名收集缓存：path -> ((mtime,size), [(model, first_time), ...])
 _MODEL_CACHE: dict = {}
 
