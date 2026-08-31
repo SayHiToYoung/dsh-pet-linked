@@ -343,6 +343,56 @@ def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]
     return best[1], best[2], best[3]
 
 
+def _scan_usage_events(f: Path) -> list[tuple]:
+    """扫描单个会话文件，返回 [(fingerprint, model, is_peak, usage), ...]。
+
+    文件内按 (turn, step) 去重；fingerprint 由 (time, seq, seq0, model,
+    四项 token) 构成，用于跨文件识别"同一事件被重复存档"。
+    """
+    events: list[tuple] = []
+    try:
+        raw = f.read_bytes()
+    except OSError:
+        return events
+    text = _decompress_all(raw)
+    seen: set[tuple] = set()
+    model = ""
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            ev = json.loads(line)
+        except Exception:
+            continue
+        data = ev.get("data") if isinstance(ev, dict) else None
+        if not isinstance(data, dict):
+            continue
+        usage_raw = data.get("usage")
+        if not (isinstance(usage_raw, dict) and isinstance(usage_raw.get("inputTokens"), (int, float))):
+            continue
+        turn = data.get("turn")
+        step = data.get("step")
+        key = (turn, step)
+        if key in seen:
+            continue
+        seen.add(key)
+        ev_model = ""
+        msg = data.get("message")
+        if isinstance(msg, dict) and msg.get("source") and msg["source"].get("model"):
+            ev_model = str(msg["source"]["model"])[:120]
+        if ev_model:
+            model = ev_model
+        mkey = ev_model or model or ""
+        is_peak = token_cost_mod.is_peak_ts(ev.get("time"))
+        usage = {k: int(usage_raw.get(uk) or 0)
+                 for k, uk in (("input", "inputTokens"), ("output", "outputTokens"),
+                               ("cacheRead", "cacheReadTokens"), ("reasoning", "reasoningTokens"))}
+        fp = (ev.get("time"), ev.get("seq"), ev.get("seq0"), mkey,
+              usage["input"], usage["output"], usage["cacheRead"], usage["reasoning"])
+        events.append((fp, mkey, is_peak, usage))
+    return events
+
+
 def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
     """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。
 
@@ -350,10 +400,15 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
       grand       —— 全部 token 之和（不分模型）；
       grand_model —— {模型名: {"total": {...}, ["peak": {...}, "off": {...}]}}
                      跨会话按模型合并，供逐模型计价。
+
+    **跨文件全局去重**：DSH 可能把同一段对话写入多个会话存档
+    （复制/恢复/多实例），事件按 (time,seq,seq0,model,用量) 指纹全局去重，
+    避免同一用量被重复累计导致总额虚高。
     """
     base = root or sessions_root()
     grand = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
     grand_model: dict[str, dict] = {}
+    seen_global: set = set()
     if not base.is_dir():
         return grand, grand_model
     try:
@@ -372,23 +427,27 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
                 key = str(f)
                 cached = _AGG_CACHE.get(key)
                 if cached is not None and cached[0] == stamp:
-                    tot, per_model = cached[1]
+                    events = cached[1]
                 else:
-                    _, tot, _, per_model = read_session_usage(f)
-                    _AGG_CACHE[key] = (stamp, (tot, per_model))
-                for k in grand:
-                    grand[k] += tot[k]
-                for mname, buckets in per_model.items():
-                    gb = grand_model.get(mname)
+                    events = _scan_usage_events(f)
+                    _AGG_CACHE[key] = (stamp, events)
+                for fp, mkey, is_peak, usage in events:
+                    if fp in seen_global:
+                        continue  # 跨文件重复事件，只计一次
+                    seen_global.add(fp)
+                    for k in grand:
+                        grand[k] += usage[k]
+                    gb = grand_model.get(mkey)
                     if gb is None:
                         gb = {"total": {k: 0 for k in grand}}
-                        if "peak" in buckets:
+                        if token_cost_mod.model_has_peak_off_peak(mkey):
                             gb["peak"] = {k: 0 for k in grand}
                             gb["off"] = {k: 0 for k in grand}
-                        grand_model[mname] = gb
-                    for tier, src in buckets.items():
-                        for k in src:
-                            gb[tier][k] += src[k]
+                        grand_model[mkey] = gb
+                    for k in grand:
+                        gb["total"][k] += usage[k]
+                        if "peak" in gb:
+                            gb["peak" if is_peak else "off"][k] += usage[k]
     except OSError:
         pass
     return grand, grand_model
