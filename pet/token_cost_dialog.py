@@ -276,7 +276,7 @@ class TokenCostDialog(QDialog):
             cur_file = session_reader.find_current_session_file()
             cur_model = ""
             if cur_file is not None:
-                _, _, cur_model, _, _ = session_reader.read_session_usage(cur_file)
+                _, _, cur_model, _ = session_reader.read_session_usage(cur_file)
             if cur_model:
                 desc, peak_p, off_p = token_cost_mod.pricing_match_info(cur_model)
                 if peak_p == off_p:

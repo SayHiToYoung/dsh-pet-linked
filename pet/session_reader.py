@@ -119,23 +119,28 @@ def _decompress_all_fallback(data: bytes) -> str:
     return b"".join(out_chunks).decode("utf-8", "replace")
 
 
-def read_session_usage(path: Path) -> tuple[str, dict, str, dict, dict]:
-    """解析一个会话日志，返回 (session_id, totals, model, peak_totals, off_totals)。
+def read_session_usage(path: Path) -> tuple[str, dict, str, dict]:
+    """解析一个会话日志，返回 (session_id, totals, model, per_model)。
 
-    totals 为全部 token；peak_totals / off_totals 按每个事件的时间戳
-    （事件顶层 `time`，毫秒）划分高峰/低谷时段分别累计，供"真实花费"
-    按各时段价估算后求和（token_cost.estimate_cost_cny_mixed）。
+    totals     —— 全部 token 之和（不分模型，用于显示 token 数）。
+    per_model  —— {模型名: {"total": {...}, "peak": {...}, "off": {...}}}：
+                   每个模型的用量独立记账；**仅该模型有峰谷两档价**
+                   （DeepSeek v4-flash/v4-pro/vision-exp）时才填 peak/off，
+                   其他模型只有 total（峰谷是 DeepSeek 专属计费逻辑，
+                   不套用到 kimi/claude/gpt 等单一定价模型）。
     按 (turn, step) 去重求和。
     """
+    def _empty() -> dict:
+        return {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+
     sid = _session_id_of(path)
-    totals = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-    peak_totals = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-    off_totals = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    totals = _empty()
+    per_model: dict[str, dict] = {}
     model = ""
     try:
         raw = path.read_bytes()
     except OSError:
-        return sid, totals, model, peak_totals, off_totals
+        return sid, totals, model, per_model
     text = _decompress_all(raw)
     seen: set[tuple] = set()
     for line in text.splitlines():
@@ -157,16 +162,30 @@ def read_session_usage(path: Path) -> tuple[str, dict, str, dict, dict]:
         if key in seen:
             continue
         seen.add(key)
-        bucket = peak_totals if token_cost_mod.is_peak_ts(ev.get("time")) else off_totals
+        # 该回合使用的模型名（事件自带；缺省时沿用当前 model）
+        ev_model = ""
+        msg = data.get("message")
+        if isinstance(msg, dict) and msg.get("source") and msg["source"].get("model"):
+            ev_model = str(msg["source"]["model"])[:120]
+        if ev_model:
+            model = ev_model
+        mkey = ev_model or model or ""
+        bucket = per_model.get(mkey)
+        if bucket is None:
+            bucket = {"total": _empty()}
+            if token_cost_mod.model_has_peak_off_peak(mkey):
+                bucket["peak"] = _empty()
+                bucket["off"] = _empty()
+            per_model[mkey] = bucket
+        tier = "peak" if bucket.get("peak") is not None and token_cost_mod.is_peak_ts(ev.get("time")) else "off"
         for k, usage_key in (("input", "inputTokens"), ("output", "outputTokens"),
                              ("cacheRead", "cacheReadTokens"), ("reasoning", "reasoningTokens")):
             n = int(usage.get(usage_key) or 0)
             totals[k] += n
-            bucket[k] += n
-        msg = data.get("message")
-        if isinstance(msg, dict) and msg.get("source") and msg["source"].get("model"):
-            model = str(msg["source"]["model"])[:120]
-    return sid, totals, model, peak_totals, off_totals
+            bucket["total"][k] += n
+            if "peak" in bucket:
+                bucket[tier][k] += n
+    return sid, totals, model, per_model
 
 
 # 全量聚合缓存：path -> ((mtime,size), totals)；文件没变就不重解析
@@ -324,17 +343,19 @@ def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]
     return best[1], best[2], best[3]
 
 
-def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict, dict]:
+def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
     """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。
 
-    返回 (grand, grand_peak, grand_off)：总账 + 高峰分桶 + 低谷分桶。
+    返回 (grand, grand_model)：
+      grand       —— 全部 token 之和（不分模型）；
+      grand_model —— {模型名: {"total": {...}, ["peak": {...}, "off": {...}]}}
+                     跨会话按模型合并，供逐模型计价。
     """
     base = root or sessions_root()
     grand = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-    grand_peak = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-    grand_off = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+    grand_model: dict[str, dict] = {}
     if not base.is_dir():
-        return grand, grand_peak, grand_off
+        return grand, grand_model
     try:
         for ws in base.iterdir():
             if not ws.is_dir():
@@ -351,17 +372,26 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict, dict]:
                 key = str(f)
                 cached = _AGG_CACHE.get(key)
                 if cached is not None and cached[0] == stamp:
-                    tot, peak, off = cached[1]
+                    tot, per_model = cached[1]
                 else:
-                    _, tot, _, peak, off = read_session_usage(f)
-                    _AGG_CACHE[key] = (stamp, (tot, peak, off))
+                    _, tot, _, per_model = read_session_usage(f)
+                    _AGG_CACHE[key] = (stamp, (tot, per_model))
                 for k in grand:
                     grand[k] += tot[k]
-                    grand_peak[k] += peak[k]
-                    grand_off[k] += off[k]
+                for mname, buckets in per_model.items():
+                    gb = grand_model.get(mname)
+                    if gb is None:
+                        gb = {"total": {k: 0 for k in grand}}
+                        if "peak" in buckets:
+                            gb["peak"] = {k: 0 for k in grand}
+                            gb["off"] = {k: 0 for k in grand}
+                        grand_model[mname] = gb
+                    for tier, src in buckets.items():
+                        for k in src:
+                            gb[tier][k] += src[k]
     except OSError:
         pass
-    return grand, grand_peak, grand_off
+    return grand, grand_model
 
 
 def latest_user_message_time(root: Path | None = None) -> float:

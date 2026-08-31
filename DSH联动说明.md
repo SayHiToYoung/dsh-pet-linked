@@ -35,7 +35,7 @@ PetWindow.update_ledger()
 | 文件 | 说明 |
 | --- | --- |
 | `pet/work_state.py` | **新增**：本地 HTTP 接收端（127.0.0.1:47890，工作状态 `/state`） |
-| `pet/session_reader.py` | **新增**：直读 DSH 会话日志（~/.dsh/sessions），逐回合解析 token 用量、模型名与**发生时间**（峰/谷分桶）；`aggregate_all_sessions` 全工作区汇总（含峰谷桶） |
+| `pet/session_reader.py` | **新增**：直读 DSH 会话日志（~/.dsh/sessions），逐回合解析 token 用量、模型名与**发生时间**，**按模型分桶**（DeepSeek 峰谷模型再分 peak/off）；`aggregate_all_sessions` 全工作区汇总（按模型合并） |
 | `pet/token_cost.py` | **新增**：DeepSeek 定价表（官方 2026-08 最新价；`v4-pro`/`v4-flash`/`v4-flash-vision-exp` 峰谷两档）+ 时间戳判峰谷 + 峰谷分桶混合计价（高峰用量×高峰价 + 低谷用量×低谷价）+ `format_number` 紧凑格式化（万/亿、K/M、完整三档；auto 档粒度调细，价格 4 位小数） |
 | `pet/token_cost_dialog.py` | **新增**：Token 花费显示设置窗口（勾选字段/口径/格式 + **价格表可视化编辑**：各模型峰/谷单价、高峰时段，**支持「添加模型」自行引入新模型前缀**；存 config.json 的 `token_pricing`/`token_peak_hours`） |
 | `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡（价格 4 位小数）；`open_token_cost_settings` |
@@ -112,6 +112,6 @@ curl -s http://127.0.0.1:47890/health         # 健康检查
   工具卡片 running）；**纯聊天不算工作**（`data-state="ongoing"` 只表示回合进行中）。只**读**，不触碰业务逻辑；
   桌宠没开时信标静默失败，不影响 DSH。所有流量本机回环（127.0.0.1），不对外。
 - usage 数据结构（来自 DSH `dsh-llm-deepseek` 的 `mapUsage`）：`{inputTokens, outputTokens, cacheReadTokens?, reasoningTokens?}`；模型名在 `assistant/message.message.source.model`。
-- **Token 花费是估算**：DeepSeek API 只返回 token 数、不返回金额，金额 = token × 单价（参考官方定价，汇率 7.2）不是账单；`deepseek-v4` 系列为峰谷计费，**按每个回合实际发生时间划分高峰/低谷用量，分别计价后求和**（高峰 = UTC 周一~五 01:00-04:00、06:00-10:00，低谷为高峰一半），金额只增不减、不随当前时间跳变。定价与峰谷窗口可在 `pet/token_cost.py` 调整。
+- **Token 花费是估算**：DeepSeek API 只返回 token 数、不返回金额，金额 = token × 单价（参考官方定价，汇率 7.2）不是账单；**按模型×峰谷双层分桶，逐模型计价后求和**：DeepSeek v4 系列按每个回合实际发生时间分高峰/低谷（高峰 = UTC 周一~五 01:00-04:00、06:00-10:00，低谷为高峰一半）分别计价；kimi 等单一定价模型不分峰谷、只用单价。会话内切换模型也不会串价（历史用量归属各自模型），金额只增不减、不随当前时间跳变。定价与峰谷窗口可在 `pet/token_cost.py` 调整。
 - **计费模型匹配规则**：计费按会话日志里的**真实模型名**（`message.source.model`）做**前缀 startswith 匹配**（转小写、最长前缀优先）——先查**用户覆盖表**（设置窗口「添加模型」填的前缀；未填的价格字段自动沿用内置/默认价），再查**内置表**（v4-flash/pro/vision-exp/chat/reasoner 档），全部未命中则**回落默认档估算**（价格可能不准）。设置窗口会列出**实际用过的模型名**并显示**当前模型的命中诊断**（绿色=命中、红色=未命中需添加），照真实名开头填前缀即可精确命中。
 - **显示设置**存 `config.json`（键 `token_display_fields` / `token_display_scopes` / `token_display_format`），跨重启保留。

@@ -124,6 +124,17 @@ def _override_pair_for(model: str | None) -> tuple[dict, dict] | None:
     return None
 
 
+def model_has_peak_off_peak(model: str | None) -> bool:
+    """该模型是否有峰谷两档价（仅 DeepSeek 内置 v4-flash / v4-pro / vision-exp 档）。
+
+    峰谷计费是 DeepSeek 专属逻辑；kimi / claude / gpt 等其他模型只有单一价格，
+    不应按时间分峰谷。基于内置档判断（覆盖不改判），避免把非 DeepSeek 模型
+    强行套用峰谷分桶。
+    """
+    peak, off = pricing_both_builtin(model)
+    return peak != off
+
+
 def _is_peak_now(when=None) -> bool:
     """高峰时段判断（UTC）：默认内置官方窗口（周一~五 01:00-04:00、06:00-10:00）；
     设置了用户覆盖窗口时按覆盖判断；周末/其余为低谷。

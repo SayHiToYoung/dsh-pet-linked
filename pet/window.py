@@ -251,11 +251,10 @@ class PetWindow(QWidget):
         # token_model = 会话日志里的模型名
         self.token_session: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
         self.token_lifetime: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-        # 峰谷分桶（按每个回合实际发生时间划分），供"真实花费"混合计价
-        self.token_session_peak: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-        self.token_session_off: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-        self.token_lifetime_peak: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
-        self.token_lifetime_off: dict = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
+        # 按模型分桶：{模型名: {"total": {...}, ["peak": {...}, "off": {...}]}}，
+        # 仅 DeepSeek 峰谷模型才有 peak/off；计价逐模型算、互不串价
+        self.token_session_model: dict = {}
+        self.token_lifetime_model: dict = {}
         self.token_model: str = ""
         self._ledger_session: str = ""
         # 装载用户覆盖的价格表与高峰窗口（设置窗口保存后在运行时也会更新）
@@ -888,13 +887,15 @@ class PetWindow(QWidget):
                 lt = data.get("lifetime")
                 if isinstance(lt, dict):
                     self.token_lifetime = {k: int(lt.get(k, 0) or 0) for k in keys}
-                self.token_lifetime_peak = {k: int((data.get("lifetimePeak") or {}).get(k, 0) or 0) for k in keys}
-                self.token_lifetime_off = {k: int((data.get("lifetimeOff") or {}).get(k, 0) or 0) for k in keys}
                 cs = data.get("currentSessionTotals")
                 if isinstance(cs, dict):
                     self.token_session = {k: int(cs.get(k, 0) or 0) for k in keys}
-                self.token_session_peak = {k: int((data.get("currentSessionPeak") or {}).get(k, 0) or 0) for k in keys}
-                self.token_session_off = {k: int((data.get("currentSessionOff") or {}).get(k, 0) or 0) for k in keys}
+                lm = data.get("lifetimeModel")
+                if isinstance(lm, dict):
+                    self.token_lifetime_model = lm
+                cm = data.get("currentSessionModel")
+                if isinstance(cm, dict):
+                    self.token_session_model = cm
                 self._ledger_session = str(data.get("currentSession") or "")
                 return
         except Exception:
@@ -917,22 +918,20 @@ class PetWindow(QWidget):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
                 "lifetime": self.token_lifetime,
-                "lifetimePeak": self.token_lifetime_peak,
-                "lifetimeOff": self.token_lifetime_off,
+                "lifetimeModel": self.token_lifetime_model,
                 "currentSession": self._ledger_session,
                 "currentSessionTotals": self.token_session,
-                "currentSessionPeak": self.token_session_peak,
-                "currentSessionOff": self.token_session_off,
+                "currentSessionModel": self.token_session_model,
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception:
             pass
 
     def update_ledger(self, session_id: str, current_totals: dict, total_totals: dict, model: str = "",
-                      current_peak: dict | None = None, current_off: dict | None = None,
-                      total_peak: dict | None = None, total_off: dict | None = None) -> None:
+                      current_model: dict | None = None, total_model: dict | None = None) -> None:
         """由会话日志读取驱动：
         本会话 = 当前工作区最新会话的总数；累计 = 所有工作区全部会话的总账。
-        *Peak / *Off 为按事件实际发生时间分桶的高峰/低谷用量，供混合计价求和。
+        *Model 为按模型分桶的用量（{模型: {"total":..., ["peak":..., "off":...]}}），
+        计价时逐模型用各自价格，避免会话内切换模型后历史用量被串价。
         """
         keys = ("input", "output", "cacheRead", "reasoning")
         if not isinstance(current_totals, dict) or not isinstance(total_totals, dict):
@@ -941,10 +940,8 @@ class PetWindow(QWidget):
             self.token_model = str(model)[:120]
         self.token_session = {k: int(current_totals.get(k, 0) or 0) for k in keys}
         self.token_lifetime = {k: int(total_totals.get(k, 0) or 0) for k in keys}
-        self.token_session_peak = {k: int((current_peak or {}).get(k, 0) or 0) for k in keys}
-        self.token_session_off = {k: int((current_off or {}).get(k, 0) or 0) for k in keys}
-        self.token_lifetime_peak = {k: int((total_peak or {}).get(k, 0) or 0) for k in keys}
-        self.token_lifetime_off = {k: int((total_off or {}).get(k, 0) or 0) for k in keys}
+        self.token_session_model = dict(current_model or {})
+        self.token_lifetime_model = dict(total_model or {})
         self._ledger_session = str(session_id or "")
         self._save_ledger_state()
 
@@ -969,6 +966,28 @@ class PetWindow(QWidget):
         fmt = cfg.get("token_display_format", "auto")
         return fields, scopes, fmt
 
+    def _model_cost(self, buckets: dict, model: str) -> float:
+        """单个模型的用量 → 费用（用该模型自己的价格，互不串价）。
+
+        DeepSeek 峰谷模型（bucket 带 peak/off）按峰谷混合计价；
+        其余单一定价模型只按 total × 单价。
+        """
+        peak_p, off_p = token_cost_mod.pricing_both_for_model(model)
+        if isinstance(buckets, dict) and "peak" in buckets and "off" in buckets:
+            return token_cost_mod.estimate_cost_cny_mixed(
+                buckets.get("peak") or {}, buckets.get("off") or {}, peak_p, off_p)
+        total = buckets.get("total") if isinstance(buckets, dict) else {}
+        return token_cost_mod.estimate_cost_cny(
+            total.get("input", 0), total.get("output", 0),
+            total.get("cacheRead", 0), total.get("reasoning", 0), off_p)
+
+    def _per_model_cost(self, per_model: dict) -> float:
+        """按模型分别计价后求和 = 真实总花费（修复会话内切模型串价）。"""
+        cost = 0.0
+        for mname, buckets in (per_model or {}).items():
+            cost += self._model_cost(buckets, mname)
+        return cost
+
     def token_cost_text(self) -> str:
         """按用户设置生成紧凑气泡文本（数字自动压成 万/亿 等）。"""
         fields, scopes, fmt = self._display_settings()
@@ -984,13 +1003,8 @@ class PetWindow(QWidget):
             parts = []
             for key in fields:
                 if key == "price":
-                    peak_p, off_p = token_cost_mod.pricing_both_for_model(self._active_model())
-                    if scope == "session":
-                        peak_t, off_t = self.token_session_peak, self.token_session_off
-                    else:
-                        peak_t, off_t = self.token_lifetime_peak, self.token_lifetime_off
-                    # 真实花费 = 高峰时段用量×高峰价 + 低谷时段用量×低谷价
-                    cost = token_cost_mod.estimate_cost_cny_mixed(peak_t, off_t, peak_p, off_p)
+                    per_model = self.token_session_model if scope == "session" else self.token_lifetime_model
+                    cost = self._per_model_cost(per_model)
                     parts.append(f"¥{cost:.4f}")
                 elif key in tot:
                     parts.append(f"{self._FIELD_LABELS.get(key, key)} {token_cost_mod.format_number(tot[key], fmt)}")

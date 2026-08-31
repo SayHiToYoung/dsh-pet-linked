@@ -83,8 +83,8 @@ class _WorkStateBridge(QObject):
     """把后台线程（信标 HTTP / 会话日志轮询）的结果安全投递到 Qt 主线程。"""
 
     changed = Signal(bool, str)
-    # session_id, current_totals, total_totals, model, current_peak, current_off, total_peak, total_off
-    ledger_changed = Signal(str, object, object, str, object, object, object, object)
+    # session_id, current_totals, total_totals, model, current_model, total_model
+    ledger_changed = Signal(str, object, object, str, object, object)
     emotion_action = Signal(str)
     care_line = Signal(str)  # 主动关怀台词 → 主线程气泡
 
@@ -105,13 +105,12 @@ class _WorkStateBridge(QObject):
                 logging.exception("work_state 应用失败")
 
     def _apply_ledger(self, session_id: str, current_totals: dict, total_totals: dict, model: str,
-                      current_peak: dict, current_off: dict,
-                      total_peak: dict, total_off: dict) -> None:
+                      current_model: dict, total_model: dict) -> None:
         win = self.controller.win
         if win is not None:
             try:
                 win.update_ledger(session_id, current_totals, total_totals, model,
-                                  current_peak, current_off, total_peak, total_off)
+                                  current_model, total_model)
             except Exception:
                 logging.exception("token ledger 应用失败")
 
@@ -267,18 +266,18 @@ class PetApp:
     def _ledger_worker(self) -> None:
         try:
             # 累计 = 所有工作区全部会话总账；本会话 = 当前工作区最新会话
-            total_totals, total_peak, total_off = session_reader.aggregate_all_sessions()
+            total_totals, total_model = session_reader.aggregate_all_sessions()
             session_file = session_reader.find_current_session_file()
             empty = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
             if session_file is None:
                 sid, current_totals, model = "", dict(empty), ""
-                current_peak, current_off = dict(empty), dict(empty)
+                current_model = {}
             else:
-                sid, current_totals, model, current_peak, current_off = \
+                sid, current_totals, model, current_model = \
                     session_reader.read_session_usage(session_file)
             self._work_bridge.ledger_changed.emit(
                 sid, current_totals, total_totals, model,
-                current_peak, current_off, total_peak, total_off)
+                current_model, total_model)
             # 情绪响应：新回合 + 空闲 + 节流 → 本地/LLM 决策动作
             if session_file is not None:
                 self._maybe_emotion_react(session_file)
