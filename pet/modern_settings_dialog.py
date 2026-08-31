@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
 
 from . import autostart as autostart_mod
 from . import catalog
+from .proactive_care import DEFAULT_THRESHOLDS
 from .config import (
     DEFAULT_CONTEXT_MENU_APPEARANCE,
     DEFAULT_MENU_EASTER_EGG,
@@ -1059,6 +1060,14 @@ class ModernSettingsDialog(QDialog):
             SettingRow("self_talk_texts", "候选内容", "每行一条；留空时恢复内置文本。", self.texts_edit, stacked=True),
             SettingRow("self_talk_images", "图片目录", "从目录中的常见图片格式随机选择；默认使用内置彩蛋图片池，留空时只显示文本。", self.self_talk_image_dir_picker, stacked=True),
         ], behavior_content))
+        behavior_layout.addWidget(SettingsSection("主动关怀", [
+            SettingRow("care_enabled", "主动关怀", "久坐 / 深夜 / 卡住 / 欢迎回来 四条提醒线；开启后只在空闲时播报，不打断工作。", self.proactive_care_check),
+            SettingRow("care_long_work", "久坐提醒阈值", "连续工作超过该时长后提醒活动。", self.care_long_work_spin),
+            SettingRow("care_night_work", "深夜劝睡阈值", "深夜 23:00–6:00 连续工作超过该时长后提醒休息。", self.care_night_work_spin),
+            SettingRow("care_stuck", "卡住提醒阈值", "同一任务状态停滞超过该时长后提醒换个思路。", self.care_stuck_spin),
+            SettingRow("care_away", "欢迎回来阈值", "离开超过该时长后回来时打招呼。", self.care_away_spin),
+            SettingRow("care_min_gap", "关怀最小间隔", "两条关怀之间至少间隔的时长。", self.care_min_gap_spin),
+        ], behavior_content))
         behavior_layout.addStretch(1)
         self._add_page("桌宠行为", "play", self._page_shell("桌宠行为", behavior_content))
 
@@ -1306,6 +1315,35 @@ class ModernSettingsDialog(QDialog):
         self.egg_avatar_picker = ResourcePathPicker(str(avatar.resolve()), parent=self)
         self.egg_image_dir_picker = ResourcePathPicker(str(image_dir.resolve()), directory=True, parent=self)
 
+        # 主动关怀（久坐/深夜/卡住/欢迎回来）
+        care_thresholds = self.config.get("proactive_care_thresholds") or {}
+        self.proactive_care_check = ToggleSwitch(self)
+        self.proactive_care_check.setChecked(bool(self.config.get("proactive_care_enabled", True)))
+        self.care_long_work_spin = BrowserDoubleSpinBox(self)
+        self.care_night_work_spin = BrowserDoubleSpinBox(self)
+        self.care_stuck_spin = BrowserDoubleSpinBox(self)
+        self.care_away_spin = BrowserDoubleSpinBox(self)
+        self.care_min_gap_spin = BrowserDoubleSpinBox(self)
+        for spin, key in (
+            (self.care_long_work_spin, "long_work_sec"),
+            (self.care_night_work_spin, "night_work_sec"),
+            (self.care_stuck_spin, "stuck_sec"),
+            (self.care_away_spin, "away_sec"),
+            (self.care_min_gap_spin, "min_gap_sec"),
+        ):
+            default_sec = DEFAULT_THRESHOLDS[key]
+            value_sec = care_thresholds.get(key, default_sec)
+            try:
+                value_min = float(value_sec) / 60.0
+            except (TypeError, ValueError):
+                value_min = default_sec / 60.0
+            spin.setRange(1, 1440)
+            spin.setDecimals(1)
+            spin.setSingleStep(1.0)
+            spin.setSuffix(" 分钟")
+            spin.setValue(value_min)
+        self.proactive_care_check.toggled.connect(self._update_care_controls)
+
     def _update_self_talk_controls(self, enabled: bool) -> None:
         keys = (
             "self_talk_duration", "self_talk_min", "self_talk_max",
@@ -1315,6 +1353,18 @@ class ModernSettingsDialog(QDialog):
             self.self_talk_duration_spin, self.min_spin, self.max_spin,
             self.texts_edit, self.self_talk_image_dir_picker,
             self.click_self_talk_check,
+        )
+        for key, control in zip(keys, controls):
+            control.setEnabled(bool(enabled))
+            row = self.findChild(SettingRow, f"settingRow_{key}")
+            if row is not None:
+                row.setEnabled(bool(enabled))
+
+    def _update_care_controls(self, enabled: bool) -> None:
+        keys = ("care_long_work", "care_night_work", "care_stuck", "care_away", "care_min_gap")
+        controls = (
+            self.care_long_work_spin, self.care_night_work_spin, self.care_stuck_spin,
+            self.care_away_spin, self.care_min_gap_spin,
         )
         for key, control in zip(keys, controls):
             control.setEnabled(bool(enabled))
@@ -1622,6 +1672,14 @@ class ModernSettingsDialog(QDialog):
         self.config.set("self_talk_duration_seconds", self.self_talk_duration_spin.value())
         self.config.set("self_talk_texts", texts or list(DEFAULT_SELF_TALK_TEXTS))
         self.config.set("self_talk_image_dir", self.self_talk_image_dir_picker.text())
+        self.config.set("proactive_care_enabled", self.proactive_care_check.isChecked())
+        self.config.set("proactive_care_thresholds", {
+            "long_work_sec": int(round(self.care_long_work_spin.value() * 60)),
+            "night_work_sec": int(round(self.care_night_work_spin.value() * 60)),
+            "stuck_sec": int(round(self.care_stuck_spin.value() * 60)),
+            "away_sec": int(round(self.care_away_spin.value() * 60)),
+            "min_gap_sec": int(round(self.care_min_gap_spin.value() * 60)),
+        })
         self.config.set("context_menu_appearance", {
             "theme": self.menu_theme_select.currentData(),
             "density": self.menu_density_select.currentData(),

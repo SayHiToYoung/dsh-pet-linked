@@ -40,7 +40,7 @@ PetWindow.update_ledger()
 | `pet/token_cost_dialog.py` | **新增**：Token 花费显示设置窗口（勾选字段/口径/格式 + **价格表可视化编辑**：各模型峰/谷单价、高峰时段，**支持「添加模型」自行引入新模型前缀**；存 config.json 的 `token_pricing`/`token_peak_hours`） |
 | `pet/window.py` | 工作态切换；`update_ledger`（双口径账本）；`token_cost_text` 按设置生成紧凑气泡（价格 4 位小数）；`open_token_cost_settings` |
 | `pet/app.py` | 拉起 WorkStateServer；`_WorkStateBridge` 投递；每 2 秒轮询会话日志（当前会话 + 全工作区总账）；情绪监听（一宠跟人走）+ 主动关怀节流 tick；`_set_app_icon` 鲸鱼 Dock 图标；托盘「Token 花费统计/设置」 |
-| `pet/proactive_care.py` | **新增**：主动关怀状态机（移植 dsh-whale-musume v1.8.0）——久坐/深夜/卡住/欢迎回来四条线，空闲才播报、15 分钟冷却；阈值可用 `proactive_care_thresholds`（秒）覆盖 |
+| `pet/proactive_care.py` | **新增**：主动关怀状态机（移植 dsh-whale-musume v1.8.0）——久坐/深夜/卡住/欢迎回来四条线，空闲才播报、15 分钟冷却；阈值可在设置界面「桌宠行为 → 主动关怀」调整（分钟），存 `proactive_care_thresholds`（秒） |
 | `pet/context_menus/modern.py` `legacy.py` | 右键菜单「Token 花费统计」「Token 花费设置」入口 |
 | `pet/emotion_actor.py` | **新增**：情绪→动作混合引擎（本地关键词 + LLM 升级导演） |
 | `beacon/dsh-work-beacon.js` | **新增**：页内信标（仅工作状态检测，URL 带内容哈希防缓存） |

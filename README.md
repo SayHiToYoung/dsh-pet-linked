@@ -56,8 +56,9 @@
   - **欢迎回来**：离开 3 分钟以上回来 → 打招呼
 - 铁律「陪着不是指挥」：**台词只在空闲时播报**，工作态绝不插嘴；关怀之间至少
   间隔 15 分钟，避免变成噪音；深夜劝睡属于关怀保留
-- 每 30 秒后台检查一次；开关 `proactive_care_enabled`，阈值可经
-  `proactive_care_thresholds`（秒）覆盖，见 `pet/proactive_care.py`
+- 每 30 秒后台检查一次；**设置界面 → 桌宠行为 →「主动关怀」**可开关四条提醒线并
+  调整各阈值（分钟），保存立即生效、无需重启；底层存 `proactive_care_enabled` /
+  `proactive_care_thresholds`（秒），见 `pet/proactive_care.py`
 
 ### 易用性
 - `scripts/make-app.sh` 一键生成「联动桌宠.app」访达/Dock 启动器（带鲸鱼图标）

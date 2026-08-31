@@ -711,8 +711,16 @@ class PetApp:
         if self.win is not None:
             self.win.refresh_pet_settings()
         self._apply_balance_timer()
+        self._reload_proactive_care()
         self._refresh_chat_windows()
         _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
+
+    def _reload_proactive_care(self) -> None:
+        """设置保存后重建主动关怀状态机（阈值即时生效，无需重启）。"""
+        try:
+            self._care = ProactiveCare(self.config.get("proactive_care_thresholds") or {})
+        except Exception:
+            logging.exception("主动关怀配置重载失败")
 
     def _notify_pet_hidden(self) -> None:
         """用户主动隐藏桌宠后弹托盘提示，指明恢复入口。"""
