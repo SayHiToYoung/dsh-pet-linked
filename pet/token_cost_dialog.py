@@ -39,10 +39,17 @@ FORMAT_OPTIONS = [
     ("km", "K / M"),
     ("full", "完整数字"),
 ]
+PERIOD_OPTIONS = [
+    ("all", "全部"),
+    ("day", "今日"),
+    ("week", "本周"),
+    ("month", "本月"),
+]
 
 DEFAULT_FIELDS = ["input", "output", "cacheRead", "price"]
 DEFAULT_SCOPES = ["session", "lifetime"]
 DEFAULT_FORMAT = "auto"
+DEFAULT_PERIOD = "all"
 
 # 内置可编辑行：模型前缀 → 界面标签（前缀按最长匹配命中实际模型）
 PRICE_ROWS = [
@@ -138,13 +145,19 @@ class TokenCostDialog(QDialog):
             self._scope_checks[key] = cb
         root.addWidget(scope_box)
 
-        # 数字格式
+        # 数字格式 + 时间范围
         fmt_row = QHBoxLayout()
         fmt_row.addWidget(QLabel("数字格式："))
         self._format_combo = QComboBox()
         self._format_combo.addItems([label for _, label in FORMAT_OPTIONS])
         self._format_combo.setMinimumWidth(150)
         fmt_row.addWidget(self._format_combo)
+        fmt_row.addSpacing(16)
+        fmt_row.addWidget(QLabel("时间范围："))
+        self._period_combo = QComboBox()
+        self._period_combo.addItems([label for _, label in PERIOD_OPTIONS])
+        self._period_combo.setMinimumWidth(100)
+        fmt_row.addWidget(self._period_combo)
         fmt_row.addStretch(1)
         root.addLayout(fmt_row)
 
@@ -254,6 +267,11 @@ class TokenCostDialog(QDialog):
             if fkey == fmt:
                 self._format_combo.setCurrentIndex(i)
                 break
+        period = self.cfg.get("token_period", DEFAULT_PERIOD)
+        for i, (pkey, _label) in enumerate(PERIOD_OPTIONS):
+            if pkey == period:
+                self._period_combo.setCurrentIndex(i)
+                break
 
         overrides = self.cfg.get("token_pricing") or {}
         hours = self.cfg.get("token_peak_hours") or []
@@ -341,11 +359,13 @@ class TokenCostDialog(QDialog):
         fields = [key for key, cb in self._field_checks.items() if cb.isChecked()]
         scopes = [key for key, cb in self._scope_checks.items() if cb.isChecked()]
         fmt = FORMAT_OPTIONS[self._format_combo.currentIndex()][0]
+        period = PERIOD_OPTIONS[self._period_combo.currentIndex()][0]
         pricing = self._collect_pricing()
         peak_hours = _parse_hours(self._hours_edit.text())
         self.cfg.set("token_display_fields", fields)
         self.cfg.set("token_display_scopes", scopes)
         self.cfg.set("token_display_format", fmt)
+        self.cfg.set("token_period", period)
         self.cfg.set("token_pricing", pricing)
         self.cfg.set("token_peak_hours", peak_hours)
         self.cfg.save()

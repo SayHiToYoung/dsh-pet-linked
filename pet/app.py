@@ -266,7 +266,8 @@ class PetApp:
     def _ledger_worker(self) -> None:
         try:
             # 累计 = 所有工作区全部会话总账；本会话 = 当前工作区最新会话
-            total_totals, total_model = session_reader.aggregate_all_sessions()
+            period = str(self.config.get("token_period", "all") or "all")
+            total_totals, total_model = session_reader.aggregate_all_sessions(period=period)
             session_file = session_reader.find_current_session_file()
             empty = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
             if session_file is None:
@@ -274,7 +275,7 @@ class PetApp:
                 current_model = {}
             else:
                 sid, current_totals, model, current_model = \
-                    session_reader.read_session_usage(session_file)
+                    session_reader.read_session_usage(session_file, period)
             self._work_bridge.ledger_changed.emit(
                 sid, current_totals, total_totals, model,
                 current_model, total_model)

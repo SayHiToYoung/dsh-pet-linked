@@ -958,13 +958,15 @@ class PetWindow(QWidget):
         "price": "价格",
     }
     _SCOPE_LABELS = {"session": "本会话", "lifetime": "累计"}
+    _PERIOD_LABELS = {"all": "", "day": "今日", "week": "本周", "month": "本月"}
 
-    def _display_settings(self) -> tuple[list, list, str]:
+    def _display_settings(self) -> tuple[list, list, str, str]:
         cfg = self.cfg
         fields = cfg.get("token_display_fields", ["input", "output", "cacheRead", "price"])
         scopes = cfg.get("token_display_scopes", ["session", "lifetime"])
         fmt = cfg.get("token_display_format", "auto")
-        return fields, scopes, fmt
+        period = str(cfg.get("token_period", "all") or "all")
+        return fields, scopes, fmt, period
 
     def _model_cost(self, buckets: dict, model: str) -> float:
         """单个模型的用量 → 费用（用该模型自己的价格，互不串价）。
@@ -990,9 +992,10 @@ class PetWindow(QWidget):
 
     def token_cost_text(self) -> str:
         """按用户设置生成紧凑气泡文本（数字自动压成 万/亿 等）。"""
-        fields, scopes, fmt = self._display_settings()
+        fields, scopes, fmt, period = self._display_settings()
         if not fields or not scopes:
             return "（没有要显示的数据，可在「Token 花费设置」里勾选）"
+        period_label = self._PERIOD_LABELS.get(period, "")
         tokens = {"session": self.token_session, "lifetime": self.token_lifetime}
         lines = []
         for scope in scopes:
@@ -1000,6 +1003,8 @@ class PetWindow(QWidget):
                 continue
             tot = tokens[scope]
             label = self._SCOPE_LABELS.get(scope, scope)
+            if period_label:
+                label = f"{label}（{period_label}）"
             parts = []
             for key in fields:
                 if key == "price":

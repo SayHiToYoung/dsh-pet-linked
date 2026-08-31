@@ -296,6 +296,7 @@ class Config:
             "chat": _default_chat_data(),
             "token_pricing": {},       # 用户覆盖价格表：{模型前缀: {"peak": {...}, "off": {...}}}（USD/百万）
             "token_peak_hours": [],    # 用户覆盖高峰窗口：[[起, 止], ...]（UTC 小时）；空=官方窗口
+            "token_period": "all",     # Token 花费时间筛选：all / day / week / month
             "proactive_care_enabled": True,   # 主动关怀总开关（久坐/深夜/卡住/欢迎回来）
             "proactive_care_thresholds": {},  # 主动关怀阈值覆盖（秒）：{long_work_sec/night_work_sec/stuck_sec/away_sec/min_gap_sec}；空=内置默认
         }
@@ -370,7 +371,7 @@ class Config:
             "chat_bg_crops",
             "chat_ui_style",
             "token_display_fields", "token_display_scopes", "token_display_format",
-            "token_pricing", "token_peak_hours",
+            "token_pricing", "token_peak_hours", "token_period",
             "proactive_care_enabled", "proactive_care_thresholds",
         ):
             if key in raw and raw[key] is not None:

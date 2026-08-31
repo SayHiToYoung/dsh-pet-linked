@@ -14,6 +14,7 @@ import json
 import os
 import re
 import zstandard
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import token_cost as token_cost_mod
@@ -119,7 +120,30 @@ def _decompress_all_fallback(data: bytes) -> str:
     return b"".join(out_chunks).decode("utf-8", "replace")
 
 
-def read_session_usage(path: Path) -> tuple[str, dict, str, dict]:
+def _period_start_ms(period: str, now: float | None = None) -> float:
+    """返回时间筛选起点（毫秒）；'all'/'今日'/'本周'/'本月' 之外或空 → 0（不过滤）。
+
+    - 今日 = 今天 00:00（本地）
+    - 本周 = 本周一 00:00
+    - 本月 = 本月 1 日 00:00
+    """
+    p = (period or "all").strip().lower()
+    if p in ("", "all", "total"):
+        return 0.0
+    now_dt = datetime.fromtimestamp(now) if now else datetime.now()
+    if p in ("day", "today"):
+        start = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif p == "week":
+        start = now_dt - timedelta(days=now_dt.weekday())
+        start = start.replace(hour=0, minute=0, second=0, microsecond=0)
+    elif p == "month":
+        start = now_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        return 0.0
+    return start.timestamp() * 1000.0
+
+
+def read_session_usage(path: Path, period: str = "all") -> tuple[str, dict, str, dict]:
     """解析一个会话日志，返回 (session_id, totals, model, per_model)。
 
     totals     —— 全部 token 之和（不分模型，用于显示 token 数）。
@@ -128,11 +152,13 @@ def read_session_usage(path: Path) -> tuple[str, dict, str, dict]:
                    （DeepSeek v4-flash/v4-pro/vision-exp）时才填 peak/off，
                    其他模型只有 total（峰谷是 DeepSeek 专属计费逻辑，
                    不套用到 kimi/claude/gpt 等单一定价模型）。
+    period     —— 时间筛选：all / day / week / month。
     按 (turn, step) 去重求和。
     """
     def _empty() -> dict:
         return {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
 
+    start_ms = _period_start_ms(period)
     sid = _session_id_of(path)
     totals = _empty()
     per_model: dict[str, dict] = {}
@@ -149,6 +175,8 @@ def read_session_usage(path: Path) -> tuple[str, dict, str, dict]:
         try:
             ev = json.loads(line)
         except Exception:
+            continue
+        if start_ms and (ev.get("time") or 0) < start_ms:
             continue
         data = ev.get("data") if isinstance(ev, dict) else None
         if not isinstance(data, dict):
@@ -348,6 +376,8 @@ def _scan_usage_events(f: Path) -> list[tuple]:
 
     文件内按 (turn, step) 去重；fingerprint 由 (time, seq, seq0, model,
     四项 token) 构成，用于跨文件识别"同一事件被重复存档"。
+    （不在此过滤时间——聚合层按 fingerprint 里的 time 做 period 筛选，
+    以便事件列表可安全缓存。）
     """
     events: list[tuple] = []
     try:
@@ -393,13 +423,15 @@ def _scan_usage_events(f: Path) -> list[tuple]:
     return events
 
 
-def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
+def aggregate_all_sessions(root: Path | None = None, period: str = "all") -> tuple[dict, dict]:
     """聚合所有工作区、所有会话的 token 总账（跨重启幂等，每次现算）。
 
     返回 (grand, grand_model)：
       grand       —— 全部 token 之和（不分模型）；
       grand_model —— {模型名: {"total": {...}, ["peak": {...}, "off": {...}]}}
                      跨会话按模型合并，供逐模型计价。
+
+    period —— 时间筛选：all / day / week / month（按事件 time 过滤）。
 
     **跨文件全局去重**：DSH 可能把同一段对话写入多个会话存档
     （复制/恢复/多实例），事件按 (time,seq,seq0,model,用量) 指纹全局去重，
@@ -409,6 +441,7 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
     grand = {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
     grand_model: dict[str, dict] = {}
     seen_global: set = set()
+    start_ms = _period_start_ms(period)
     if not base.is_dir():
         return grand, grand_model
     try:
@@ -432,6 +465,8 @@ def aggregate_all_sessions(root: Path | None = None) -> tuple[dict, dict]:
                     events = _scan_usage_events(f)
                     _AGG_CACHE[key] = (stamp, events)
                 for fp, mkey, is_peak, usage in events:
+                    if start_ms and (fp[0] or 0) < start_ms:
+                        continue  # 时间筛选
                     if fp in seen_global:
                         continue  # 跨文件重复事件，只计一次
                     seen_global.add(fp)
