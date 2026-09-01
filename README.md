@@ -2,12 +2,19 @@
 
 基于 [MerZlin/dsh-pet-indesktop](https://github.com/MerZlin/dsh-pet-indesktop)（其源于 [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)）的**二次开发分支**。
 
-在原项目"独立桌面宠物"的基础上，新增了两项 DSH 深度集成能力：
+在原项目"独立桌面宠物"的基础上，新增了几项 DSH 深度集成能力：
 
 1. 🐋 **DSH 工作状态联动** —— 桌宠实时感知 DeepSeek Harness 是否在跑工具/回合，
    工作时切到「写代码 / 吃Token / 敲桌面」等认真动画并闭嘴摸鱼，收工后恢复；
 2. 💰 **DSH Token 花费统计** —— 完全由 DSH 会话数据驱动（模型名 + token 用量都来自
-   DSH 事件流），桌宠零 API 绑定，实时累计并估算花费。
+   DSH 事件流），桌宠零 API 绑定，实时累计并估算花费；
+3. 🏢 **办公区联动（dsh-agent-office）** —— 与 DSH 里的「多智能体办公区」插件联动：
+   office 把主控鲸状态实时推来镜像；「送去桌面 / 叫回办公室」双向搬家；归属状态机
+   保证同一只鲸同一时刻只在办公室或桌面一处渲染。
+4. 🎮 **情境感知（开发中）** —— 监听前台应用/进程，知道「现在该不该打扰」：
+   打游戏缩角落静音、开会自动隐身、DSH/IDE 在前台则进入工作陪伴态。只感知情境、
+   不读用户内容，本地权限、无封号风险。详见
+   [docs/情境感知-无处不在-2026-09-01.md](./docs/情境感知-无处不在-2026-09-01.md)。
 
 > 数据全部走本机回环（127.0.0.1），无遥测、无外部请求。DSH 侧只注入一个只读信标脚本，
 > 不修改 DSH 业务逻辑，可随时回滚。
@@ -21,6 +28,17 @@
   纯聊天不算工作（300ms 去抖 + 心跳）
 - 桌宠 `_pick_next` 增加工作态分支：只播「工作池动画 + 待机」，不移动、不闲聊
 - 开工/收工有气泡反馈
+
+### 办公区联动（与 dsh-agent-office 插件）
+- **状态镜像**：`POST /office/root` → `notify_root` → `window.mirror_agent()`，把主控鲸
+  的状态（思考 / 跑工具 / 等批准…）映射成桌宠动画
+- **搬家**：`POST /office/handoff {dir:"to_desktop"|"to_office", fromScreen}` →
+  `handoff_enter / handoff_leave / _handoff_glide` 沿屏幕坐标滑行进出，形象与办公区同款（shenshen）
+- **归属状态机**：`desktop_list()` / `set_on_desktop()` / `office_root_id()` 维护
+  「谁在桌面」，办公区轮询 `/office/desktop` 对齐，避免同一只鲸两处同画
+- **信号优先级**：office 状态（7 秒心跳）压制旧 DOM 信标；心跳失效后信标自动接管，
+  避免两套工作态打架
+- 单测：`tests/test_office_handoff.py`
 
 ### Token 花费统计（直读 DSH 会话日志）
 - **权威数据源**：直接解析 DSH 落盘的会话日志
@@ -104,6 +122,7 @@ node scripts/inject-beacon.mjs --target "<DSH_INSTALL_DIR>"
 ## 📄 文档
 
 - [DSH联动说明.md](./DSH联动说明.md) —— 本次二次开发的完整架构与说明
+- [docs/情境感知-无处不在-2026-09-01.md](./docs/情境感知-无处不在-2026-09-01.md) —— 下一阶段方向与开发计划（情境感知）
 - [docs/UPSTREAM-README.md](./docs/UPSTREAM-README.md) —— 上游作者原始 README（存档）
 - docs/ —— 上游开发过程中的其他记录
 
