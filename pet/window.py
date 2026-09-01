@@ -187,6 +187,8 @@ class PetWindow(QWidget):
         self.on_restore_fun_windows = None
         self.on_spawn_pet = None
         self.on_hidden = None  # 由 app 注入：用户主动隐藏时弹托盘提示
+        self.on_dropped = None  # 由 app 注入：拖拽松手 → 判断是否拖进了办公区(搬回)
+        self.on_drag_move = None  # 由 app 注入：拖拽移动 → 上报位置(办公区 ghost 实时预览)
         self._position_listeners = []
         self._animation_icon_image_cache: dict[str, QImage] = {}
         self._animation_icon_inflight: dict[str, threading.Event] = {}
@@ -245,6 +247,11 @@ class PetWindow(QWidget):
         # work_state=True 表示 DSH 正在跑工具/回合进行中，桌宠切"认真工作"动画
         self.work_state: bool = False
         self.work_detail: str = ""
+        # ---- 办公区(dsh-agent-office)镜像 / 搬家 联动 ----
+        self._approval_nudging: bool = False       # 正在提醒“有分身等批准”
+        self._mirror_done_shown: bool = False      # 主控鲸本轮“干完啦”是否已播
+        self._handoff_timer: QTimer | None = None  # 搬家滑行定时器（懒建）
+        self._mirror_state: str = ""
 
         # ---- Token 花费统计（二次开发新增，DSH 会话日志驱动）----
         # token_session = 当前工作区最新会话总数；token_lifetime = 所有工作区总账
@@ -861,6 +868,204 @@ class PetWindow(QWidget):
             return
         self._switch(action)
 
+    # ================================================================ 办公区联动（dsh-agent-office：镜像 + 搬家）
+    def _first_anim(self, candidates: list[str]) -> str | None:
+        """从候选动作里挑第一个当前形象真的拥有的，挑不到返回 None。"""
+        have = self.lib.names()
+        for c in candidates:
+            if c in have:
+                return c
+        return None
+
+    def _first_anim_keyword(self, keywords: list[str]) -> str | None:
+        """按素材的真实名称选动作，兼容中文素材名和外部角色包。"""
+        for name in self.lib.names():
+            if any(keyword in name for keyword in keywords):
+                return name
+        return None
+
+    def mirror_agent(self, root: dict) -> None:
+        """把办公区「主控鲸」的实时状态映射到桌宠（桌宠固定代表主控鲸）。
+
+        root 由办公区推来：{state,text,detail,currentTool,label,model,busy,approvals}
+        复用现有 set_work_state / react_to_emotion / show_bubble，不新增动画资源。
+        """
+        if not isinstance(root, dict):
+            return
+        state = str(root.get("state") or "idle")
+        text = str(root.get("text") or root.get("detail") or "")[:60]
+        state_changed = state != self._mirror_state
+        self._mirror_state = state
+        busy = bool(root.get("busy")) or state not in ("idle", "done")
+        try:
+            approvals = int(root.get("approvals") or 0)
+        except Exception:
+            approvals = 0
+
+        # 1) 审批召唤：最高优先级——有分身在等你点头，桌宠常驻可见，最该由它提醒
+        if approvals > 0:
+            if not self._approval_nudging:
+                self._approval_nudging = True
+                self.show_bubble(f"有 {approvals} 个分身在等你点头 👉", duration_ms=6000)
+                act = self._first_anim_keyword(["东张西望", "被吓一跳", "深度思考"])
+                if act and not self.work_state:
+                    self._switch(act)
+        else:
+            self._approval_nudging = False
+
+        # 2) 干完啦：庆祝一次
+        if state == "done":
+            self.set_work_state(False, "")
+            if not self._mirror_done_shown:
+                self._mirror_done_shown = True
+                act = self._first_anim_keyword(
+                    ["优雅女仆舞", "轻快摇摆舞", "开心跃动", "女仆屈膝"]
+                )
+                if act:
+                    self._switch(act)
+                self.show_bubble("主控鲸干完啦 🎉", duration_ms=2600)
+            return
+        self._mirror_done_shown = False
+
+        # 3) 常规：忙就切工作动画，闲就摸鱼（复用工作态入口，自带去抖/气泡）
+        self.set_work_state(busy, text)
+        if state_changed and busy:
+            state_keywords = {
+                "assigned": ["女仆屈膝", "开心跃动"],
+                "thinking": ["深度思考", "专心玩魔方"],
+                "tool": ["写代码", "敲击桌面", "吃Token"],
+                "writing": ["轻快记录", "写代码"],
+                "waiting": ["东张西望", "待机呼吸"],
+                "error": ["玩游戏气急败坏", "被吓一跳"],
+            }
+            act = self._first_anim_keyword(state_keywords.get(state, []))
+            if act:
+                self._switch(act)
+
+    # ---------------- 搬家：主控鲸走出办公室来到桌面 / 走回去 ----------------
+    def _handoff_glide(self, tx: int, ty: int, on_done=None,
+                       fade_in_ms: int = 0, fade_out_ms: int = 0) -> None:
+        """朝 (tx,ty)（窗口左上角坐标）平滑滑行，播走路动画，到位回调。
+
+        fade_in_ms / fade_out_ms：>0 时在滑行开头/结尾同步做窗口透明度渐变，
+        让「走出办公室→来到桌面」不再瞬移闪现，而是真淡入淡出地接力。
+        """
+        timer = self._handoff_timer
+        if timer is None:
+            timer = QTimer(self)
+            timer.setInterval(16)
+            self._handoff_timer = timer
+        try:
+            timer.timeout.disconnect()
+        except Exception:
+            pass
+        self._cancel_move()  # 别和自动漫游打架
+        self._stop_physics()  # 松手可能刚进入惯性抛掷，交接动画必须取得唯一控制权
+        sx, sy = float(self.x()), float(self.y())
+        self.facing = 'right' if tx >= sx else 'left'
+        if self.moves:
+            self._switch(self._pick(self.moves))
+        clock = QElapsedTimer()
+        clock.start()
+        dur = max(320, min(2600, int(math.hypot(tx - sx, ty - sy) / 0.6)))  # ~0.6 px/ms
+        # 淡入淡出最多各占全程 40%，保证中间有一小段完全现形（避免整段半透明）
+        fade_in_ms = max(0, min(int(fade_in_ms), int(dur * 0.4)))
+        fade_out_ms = max(0, min(int(fade_out_ms), int(dur * 0.4)))
+
+        def _tick() -> None:
+            try:
+                elapsed = clock.elapsed()
+                p = min(1.0, elapsed / dur)
+                e = p * p * (3 - 2 * p)  # smoothstep
+                self.move(int(round(sx + (tx - sx) * e)), int(round(sy + (ty - sy) * e)))
+                # 透明度：开头淡入、结尾淡出、中间恒 1.0
+                if fade_in_ms > 0 and elapsed < fade_in_ms:
+                    fi = min(1.0, elapsed / fade_in_ms)
+                    self.setWindowOpacity(fi * fi * (3 - 2 * fi))
+                elif fade_out_ms > 0 and p >= 1.0 - fade_out_ms / dur:
+                    fo = min(1.0, (elapsed - (dur - fade_out_ms)) / fade_out_ms)
+                    self.setWindowOpacity(1.0 - fo * fo * (3 - 2 * fo))
+                elif self.windowOpacity() != 1.0:
+                    self.setWindowOpacity(1.0)
+                if p >= 1.0:
+                    timer.stop()
+                    if self.idles:
+                        self._switch(self._pick(self.idles))
+                    if on_done:
+                        on_done()
+            except Exception:
+                timer.stop()
+
+        timer.timeout.connect(_tick)
+        timer.start()
+
+    def handoff_enter(self, screen_x: float, screen_y: float, label: str = "") -> None:
+        """从办公区大门位置（屏幕坐标）连续走入桌面，落到一个休息位。
+
+        与 office.js 时序对齐：office 鲸走到大门开始淡出的同时就 POST，
+        这里从大门坐标无缝接力——窗口先落在门边（脚对齐 fromScreen），
+        再带真淡入(300ms)滑向屏幕内休息位，不再瞬移闪现。
+        """
+        try:
+            pad = catalog.PAD * self.scale
+            # 起点 = 办公区大门（脚底对齐 office 传来的屏幕坐标）
+            sx = int(round(screen_x - self._w / 2))
+            sy = int(round(screen_y - self._h + pad))
+            # 终点 = 屏幕内休息位（朝屏幕中心走进一段，clamp 进可用区）
+            tx, ty = sx, sy
+            scr = self._screen_available()
+            if scr is not None:
+                avail = scr.availableGeometry()
+                inward = 260 if sx < avail.center().x() else -260
+                tx = max(avail.left(), min(avail.right() - self._w, sx + inward))
+                ty = max(avail.top(), min(avail.bottom() - self._h, sy))
+            # 先定位再显示：透明度 0 时就位，避免 show 时在旧位置闪一帧
+            self._cancel_move()
+            self.move(sx, sy)
+            self.setWindowOpacity(0.0)
+            self.show()
+            self.raise_()
+            if label:
+                self.show_bubble(f"{label} 来桌面帮你盯着～", duration_ms=2600)
+            # 真淡入 + 从大门一路滑进，一气呵成，不再 singleShot 瞬闪
+            self._handoff_glide(tx, ty, fade_in_ms=300)
+        except Exception:
+            logging.exception("handoff_enter 失败")
+            try:
+                self.setWindowOpacity(1.0)
+            except Exception:
+                pass
+
+    def handoff_leave(self, screen_x: float | None = None,
+                      screen_y: float | None = None,
+                      on_done=None) -> None:
+        """走回 DSH 工作区（办公室大门）；结尾真淡出，由网页宠物接棒。"""
+        try:
+            pad = catalog.PAD * self.scale
+            if screen_x is None:
+                scr = self._screen_available()
+                if scr is not None:
+                    avail = scr.availableGeometry()
+                    screen_x = avail.right() if self.x() > avail.center().x() else avail.left()
+                else:
+                    screen_x = self.x() + self._w / 2
+            tx = int(round(screen_x - self._w / 2))
+            # 脚对齐大门地面(与 handoff_enter 的 sy 同一约定),不横向串位
+            ty = self.y() if screen_y is None else int(round(screen_y - self._h + pad))
+            self.show_bubble("回办公室啦 🐋", duration_ms=2200)
+
+            def _finish() -> None:
+                self.setWindowOpacity(0.0)
+                self.hide(notify=False)
+                self.setWindowOpacity(1.0)
+                if on_done:
+                    on_done()
+
+            # 结尾 300ms 真淡出，而不是到位瞬间消失
+            self._handoff_glide(tx, ty, on_done=_finish, fade_out_ms=300)
+        except Exception:
+            logging.exception("handoff_leave 失败")
+
     # ================================================================ Token 花费统计（DSH 会话日志驱动）
     def _token_usage_path(self) -> Path:
         return Path(self.cfg.dir) / "token_ledger.json"
@@ -1166,6 +1371,11 @@ class PetWindow(QWidget):
                 self._physics_timer.start()
         else:
             self.move(g - self._grab_offset)  # 跟手（保持抓起时的偏移）
+        if self.on_drag_move:
+            try:
+                self.on_drag_move(self.frameGeometry())  # 上报实时位置 → 办公区 ghost 预览
+            except Exception:
+                logging.exception("on_drag_move 回调失败")
         event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
@@ -1198,6 +1408,11 @@ class PetWindow(QWidget):
                 self._save_position()
             if self.idles:
                 self._switch(self._pick(self.idles))  # 回待机缓冲
+            if self.on_dropped:
+                try:
+                    self.on_dropped(self.frameGeometry())  # 松手位置 → app 判断是否拖进办公区
+                except Exception:
+                    logging.exception("on_dropped 回调失败")
         elif dist < catalog.DRAG_THRESHOLD * self.scale:
             self._on_click()
         self._dragging = False

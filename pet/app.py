@@ -87,6 +87,8 @@ class _WorkStateBridge(QObject):
     ledger_changed = Signal(str, object, object, str, object, object)
     emotion_action = Signal(str)
     care_line = Signal(str)  # 主动关怀台词 → 主线程气泡
+    office_root = Signal(object)  # 办公区推来的「主控鲸」状态 → 桌宠镜像
+    handoff = Signal(object)      # 办公区触发「搬家」→ 走入/走回动画
 
     def __init__(self, controller) -> None:
         super().__init__()
@@ -95,6 +97,8 @@ class _WorkStateBridge(QObject):
         self.ledger_changed.connect(self._apply_ledger)
         self.emotion_action.connect(self._apply_emotion_action)
         self.care_line.connect(self._apply_care_line)
+        self.office_root.connect(self._apply_office_root)
+        self.handoff.connect(self._apply_handoff)
 
     def _apply(self, working: bool, detail: str) -> None:
         win = self.controller.win
@@ -130,6 +134,42 @@ class _WorkStateBridge(QObject):
                 win.show_bubble(str(line), duration_ms=6000)
             except Exception:
                 logging.exception("主动关怀气泡失败")
+
+    def _apply_office_root(self, root) -> None:
+        """办公区「主控鲸」实时状态 → 桌宠镜像（主线程）。"""
+        win = self.controller.win
+        if win is not None and isinstance(root, dict):
+            try:
+                win.mirror_agent(root)
+            except Exception:
+                logging.exception("办公区镜像应用失败")
+
+    def _apply_handoff(self, info) -> None:
+        """办公区「搬家」→ 走入/走回动画（主线程）。"""
+        win = self.controller.win
+        if win is None or not isinstance(info, dict):
+            return
+        try:
+            direction = str(info.get("dir") or "to_desktop")
+            fs = info.get("fromScreen") if isinstance(info.get("fromScreen"), dict) else {}
+            sx = fs.get("x")
+            sy = fs.get("y")
+            if direction == "to_office":
+                agent_id = str(info.get("agentId") or info.get("id") or "root")
+
+                def _arrived() -> None:
+                    srv = getattr(self.controller, "_work_server", None)
+                    if srv is not None:
+                        srv.set_on_desktop(agent_id, False)
+
+                win.handoff_leave(sx, sy, on_done=_arrived)
+            else:
+                # handoff_enter 内部会：先定位到大门→透明度0→show→淡入滑入，无需提前 show
+                win.handoff_enter(float(sx if sx is not None else 0.0),
+                                  float(sy if sy is not None else 0.0),
+                                  label=str(info.get("label") or ""))
+        except Exception:
+            logging.exception("搬家动画应用失败")
 
 
 def _setup_logging(config: Config) -> None:
@@ -223,10 +263,17 @@ class PetApp:
             # Token 记账已改为直读 DSH 会话日志，不再依赖信标上报用量
             on_usage=None,
             on_emote=self._on_emote,
+            # 办公区(dsh-agent-office)联动：主控鲸状态镜像 + 搬家
+            on_root=self._on_office_root,
+            on_handoff=self._on_handoff,
         )
         if server.start():
             self._work_server = server
             if self.win is not None:
+                # 桌宠被拖动松手 → 判断是否拖进了办公区面板(搬回)
+                self.win.on_dropped = self._on_pet_dropped
+                # 桌宠拖动中 → 上报位置,办公区 ghost 无感进入预览
+                self.win.on_drag_move = self._on_pet_drag_move
                 self.win.show_bubble(
                     f"已连接工作状态信标（127.0.0.1:{server.port}）",
                     duration_ms=3200,
@@ -238,6 +285,89 @@ class PetApp:
     def _on_work_state_change(self, working: bool, detail: str) -> None:
         # HTTP 线程 → Qt 主线程（Signal 队列投递）
         self._work_bridge.changed.emit(working, detail)
+
+    def _on_office_root(self, root: dict) -> None:
+        # 办公区推来的主控鲸状态（HTTP 线程）→ 主线程镜像
+        self._work_bridge.office_root.emit(root)
+
+    def _on_handoff(self, info: dict) -> None:
+        # 办公区触发搬家（HTTP 线程）→ 主线程播动画
+        self._work_bridge.handoff.emit(info)
+
+    def _pet_over_office(self, geo):
+        """返回 (rect, rid, cx, cy, over)；rect/rid 缺失时 over=False。"""
+        srv = self._work_server
+        if srv is None:
+            return None, None, 0.0, 0.0, False
+        rect = srv.office_rect()
+        rid = srv.office_root_id()
+        cx = geo.x() + geo.width() / 2.0
+        cy = geo.y() + geo.height() / 2.0
+        over = False
+        if rect and rid:
+            left, top = rect.get("left"), rect.get("top")
+            right, bottom = rect.get("right"), rect.get("bottom")
+            if None not in (left, top, right, bottom):
+                over = (left <= cx <= right and top <= cy <= bottom)
+        return rect, rid, cx, cy, over
+
+    def _on_pet_drag_move(self, geo) -> None:
+        """桌宠拖动中（主线程）→ 上报实时位置 + 是否压在办公区上，触发办公区 ghost 预览。
+
+        仅当主控鲸当前「在桌面」（由桌宠持有）时，压进面板才算 over——此时桌宠
+        淡出交棒、办公区冒出 ghost 跟随光标，实现无感进入。
+        """
+        srv = self._work_server
+        win = self.win
+        if srv is None or win is None:
+            return
+        try:
+            _rect, rid, cx, cy, over = self._pet_over_office(geo)
+            over = bool(over and rid and (rid in srv.desktop_list()))
+            srv.set_drag_state(True, cx, cy, over)
+            try:
+                win.setWindowOpacity(0.32 if over else 1.0)  # 压进办公区→淡出交棒
+            except Exception:
+                pass
+        except Exception:
+            logging.exception("拖动上报失败")
+
+    def _on_pet_dropped(self, geo) -> None:
+        """桌宠拖拽松手（主线程）→ 若落在办公区面板范围内,则「搬回办公室」。
+
+        落点语义：桌宠拖到面板的哪个位置，主控鲸最终就落到那个位置对应的
+        场景坐标（屏幕坐标 → 场景坐标换算在办公区完成）。这里把桌宠窗口中心
+        作为落点记录，并让桌宠走回该落点后淡出，办公区鲸在同一点接棒。
+        """
+        srv = self._work_server
+        win = self.win
+        if srv is None or win is None:
+            return
+        committed = False
+        try:
+            rect, rid, cx, cy, over = self._pet_over_office(geo)
+            if rect and rid and over:
+                committed = True
+                # 记录落点（一次性下发给办公区，决定主控鲸落到哪个场景位置）
+                srv.note_drop_screen(cx, cy)
+
+                def _arrived() -> None:
+                    srv.set_on_desktop(rid, False)
+
+                win.handoff_leave(cx, cy, on_done=_arrived)
+        except Exception:
+            logging.exception("拖回办公区判定失败")
+        finally:
+            # 结束拖动预览：清 ghost 上报；没搬回则恢复不透明度
+            try:
+                srv.set_drag_state(False, 0.0, 0.0, False)
+            except Exception:
+                pass
+            if not committed:
+                try:
+                    win.setWindowOpacity(1.0)
+                except Exception:
+                    pass
 
     def _stop_work_state(self) -> None:
         if self._work_server is not None:
