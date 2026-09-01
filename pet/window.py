@@ -51,6 +51,7 @@ from .context_menus.shared import take_deferred_menu_callbacks
 from . import vision as vision_mod
 from . import physics as physics_mod
 from . import token_cost as token_cost_mod
+from . import context_aware as context_mod
 
 
 def _resolve_self_talk_image_dir(raw: str) -> str:
@@ -252,6 +253,13 @@ class PetWindow(QWidget):
         self._mirror_done_shown: bool = False      # 主控鲸本轮“干完啦”是否已播
         self._handoff_timer: QTimer | None = None  # 搬家滑行定时器（懒建）
         self._mirror_state: str = ""
+        # ---- 情境感知（二次开发新增）----
+        # _context = 当前情境(idle/meeting/gaming/work/focus)；
+        # _context_hidden = meeting/focus 时桌宠自己躲起来；
+        # _context_quiet = gaming 时安静（不移动/不闲聊/不打扰），但保持可见。
+        self._context: str = context_mod.IDLE
+        self._context_hidden: bool = False
+        self._context_quiet: bool = False
 
         # ---- Token 花费统计（二次开发新增，DSH 会话日志驱动）----
         # token_session = 当前工作区最新会话总数；token_lifetime = 所有工作区总账
@@ -813,6 +821,11 @@ class PetWindow(QWidget):
         if self.work_state:
             self._switch(self._pick(self._work_pool() + self.idles, exclude=self.anim))
             return
+        if self._context_quiet:
+            # 游戏时安静：只待机打盹，不移动、不乱跑、不突然切动作（二次开发新增）
+            if self.idles:
+                self._switch(self._pick(self.idles, exclude=self.anim))
+            return
         roll = random.random()
         if roll < catalog.P_IDLE:
             if self.idles:
@@ -852,6 +865,9 @@ class PetWindow(QWidget):
             return
         self.work_state = working
         self.work_detail = detail
+        if self.is_quiet():
+            # 开会/游戏安静态：只记状态，不弹气泡、不切工作动画，保持低调
+            return
         if working:
             self.show_bubble("收到开工信号，认真写代码啦！💻", duration_ms=2400)
             self._switch(self._pick(self._work_pool(), exclude=self.anim))
@@ -860,13 +876,61 @@ class PetWindow(QWidget):
             self._pick_next()
 
     def react_to_emotion(self, action: str) -> None:
-        """播放情绪动作（由 app 层根据对话情绪触发；工作态不打断）。"""
-        if not action or self.work_state:
+        """播放情绪动作（由 app 层根据对话情绪触发；工作态/安静/躲起不打断）。"""
+        if not action or self.work_state or self._context_quiet or self._context_hidden:
             return
         names = self.lib.names()
         if action not in names:
             return
         self._switch(action)
+
+    # ================================================================ 情境感知（二次开发新增）
+    def context(self) -> str:
+        """当前情境（idle/meeting/gaming/work/focus）。"""
+        return self._context
+
+    def is_quiet(self) -> bool:
+        """是否需要安静：开会躲起 / 游戏安静时为 True（统一事件流最高优先级）。"""
+        return context_mod.context_blocks_interrupt(self._context)
+
+    def _hide_for_context(self) -> None:
+        """自动躲起：淡出到 0 → 内部隐藏（不弹托盘、不 arm Dock 恢复）。"""
+        try:
+            self.setWindowOpacity(0.0)
+            self.hide(notify=False)
+            self.setWindowOpacity(1.0)
+        except Exception:
+            logging.exception("情境躲起失败")
+
+    def apply_context(self, context: str, app: dict | None = None) -> None:
+        """情境感知入口：由 app 层（情境 connector）调用。
+
+        meeting/focus → 躲起来；gaming → 安静待机不打扰；work/idle → 正常陪伴。
+        只在情境真正变化时动作一次（防抖已由 ContextAwareMonitor 保证）。
+        """
+        context = str(context or context_mod.IDLE)
+        if context == self._context:
+            return
+        self._context = context
+        behavior = context_mod.behavior_for(context)
+        self._context_quiet = bool(behavior.get("quiet"))
+
+        if behavior.get("hidden"):
+            if not self._context_hidden:
+                self._context_hidden = True
+                self._hide_for_context()
+        else:
+            restored = self._context_hidden
+            if restored:
+                self._context_hidden = False
+                try:
+                    self.setWindowOpacity(1.0)
+                    self.show()
+                except Exception:
+                    logging.exception("情境恢复显示失败")
+                self.show_bubble("开完啦，我回来啦 🐳", duration_ms=2200)
+            if not restored and context == context_mod.GAMING:
+                self.show_bubble("你打游戏呢？我不吵你，乖乖打盹～ 🎮", duration_ms=2400)
 
     # ================================================================ 办公区联动（dsh-agent-office：镜像 + 搬家）
     def _first_anim(self, candidates: list[str]) -> str | None:
@@ -901,15 +965,17 @@ class PetWindow(QWidget):
             approvals = int(root.get("approvals") or 0)
         except Exception:
             approvals = 0
+        quiet = self.is_quiet()  # 情境感知最高优先级：开会/专注/游戏时压过办公区镜像
 
         # 1) 审批召唤：最高优先级——有分身在等你点头，桌宠常驻可见，最该由它提醒
         if approvals > 0:
             if not self._approval_nudging:
                 self._approval_nudging = True
-                self.show_bubble(f"有 {approvals} 个分身在等你点头 👉", duration_ms=6000)
-                act = self._first_anim_keyword(["东张西望", "被吓一跳", "深度思考"])
-                if act and not self.work_state:
-                    self._switch(act)
+                if not quiet:
+                    self.show_bubble(f"有 {approvals} 个分身在等你点头 👉", duration_ms=6000)
+                    act = self._first_anim_keyword(["东张西望", "被吓一跳", "深度思考"])
+                    if act and not self.work_state:
+                        self._switch(act)
         else:
             self._approval_nudging = False
 
@@ -918,18 +984,19 @@ class PetWindow(QWidget):
             self.set_work_state(False, "")
             if not self._mirror_done_shown:
                 self._mirror_done_shown = True
-                act = self._first_anim_keyword(
-                    ["优雅女仆舞", "轻快摇摆舞", "开心跃动", "女仆屈膝"]
-                )
-                if act:
-                    self._switch(act)
-                self.show_bubble("主控鲸干完啦 🎉", duration_ms=2600)
+                if not quiet:
+                    act = self._first_anim_keyword(
+                        ["优雅女仆舞", "轻快摇摆舞", "开心跃动", "女仆屈膝"]
+                    )
+                    if act:
+                        self._switch(act)
+                    self.show_bubble("主控鲸干完啦 🎉", duration_ms=2600)
             return
         self._mirror_done_shown = False
 
         # 3) 常规：忙就切工作动画，闲就摸鱼（复用工作态入口，自带去抖/气泡）
         self.set_work_state(busy, text)
-        if state_changed and busy:
+        if state_changed and busy and not quiet:
             state_keywords = {
                 "assigned": ["女仆屈膝", "开心跃动"],
                 "thinking": ["深度思考", "专心玩魔方"],
@@ -1619,8 +1686,8 @@ class PetWindow(QWidget):
         return True
 
     def _on_self_talk_timeout(self) -> None:
-        if self.work_state:
-            # 工作中保持安静：不闲聊、不打扰（二次开发新增）
+        if self.work_state or self.is_quiet():
+            # 工作 / 开会 / 游戏时保持安静：不闲聊、不打扰（二次开发新增）
             self._schedule_self_talk()
             return
         displayed = False

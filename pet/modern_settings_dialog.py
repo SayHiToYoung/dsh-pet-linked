@@ -560,6 +560,27 @@ def _line_edit(text: str = "", *, password: bool = False, width: int = 240) -> Q
     return edit
 
 
+def _rule_edit(tokens=None) -> QPlainTextEdit:
+    """情境感知关键词编辑器：每行一个关键词，留空回退内置默认。"""
+    edit = QPlainTextEdit()
+    edit.setMinimumSize(240, 60)
+    edit.setMaximumHeight(140)
+    edit.setPlaceholderText("每行一个关键词；留空用内置默认")
+    if tokens:
+        edit.setPlainText("\n".join(str(t) for t in tokens))
+    return edit
+
+
+def _rule_lines(edit: QPlainTextEdit) -> list[str]:
+    """把关键词编辑器读回成列表（去空白、去重、截断、保序）。"""
+    seen: list[str] = []
+    for line in edit.toPlainText().splitlines():
+        text = line.strip()[:120]
+        if text and text not in seen:
+            seen.append(text)
+    return seen
+
+
 class QuickLaunchEditor(QWidget):
     """Small application picker persisted into the modern menu."""
 
@@ -1071,6 +1092,22 @@ class ModernSettingsDialog(QDialog):
         behavior_layout.addStretch(1)
         self._add_page("桌宠行为", "play", self._page_shell("桌宠行为", behavior_content))
 
+        context_content = QWidget()
+        context_layout = QVBoxLayout(context_content)
+        context_layout.setContentsMargins(0, 0, 0, 0)
+        context_layout.setSpacing(16)
+        context_layout.addWidget(SettingsSection("总开关", [
+            SettingRow("context_aware", "情境感知", "监听前台应用：打游戏安静、开会自动躲起、DSH/IDE 前台进入工作陪伴。", self.context_aware_check),
+            SettingRow("context_focus", "别打扰我", "手动专注模式：立即躲起来，直到你关闭此开关。", self.context_focus_check),
+        ], context_content))
+        context_layout.addWidget(SettingsSection("识别关键词（每行一个）", [
+            SettingRow("context_meeting", "开会应用", "命中即判定为「开会」，桌宠自动躲起来。留空用内置默认。", self.context_meeting_edit, stacked=True),
+            SettingRow("context_gaming", "游戏应用", "命中即判定为「游戏」，桌宠安静待机不打扰。留空用内置默认。", self.context_gaming_edit, stacked=True),
+            SettingRow("context_work", "工作应用", "命中即判定为「工作」，桌宠进入陪伴态。留空用内置默认。", self.context_work_edit, stacked=True),
+        ], context_content))
+        context_layout.addStretch(1)
+        self._add_page("情境感知", "screen", self._page_shell("情境感知", context_content))
+
         appearance_content = QWidget()
         appearance_layout = QVBoxLayout(appearance_content)
         appearance_layout.setContentsMargins(0, 0, 0, 0)
@@ -1150,6 +1187,7 @@ class ModernSettingsDialog(QDialog):
         self._update_translucency_controls(self.menu_translucent_check.isChecked())
         # 初始同步须在全部 SettingRow 构建完成后执行，否则 findChild 找不到行
         self._update_click_sound_controls(self.click_sound_check.isChecked())
+        self._update_context_controls(self.context_aware_check.isChecked())
 
         self.setStyleSheet(self._stylesheet())
 
@@ -1343,6 +1381,31 @@ class ModernSettingsDialog(QDialog):
             spin.setSuffix(" 分钟")
             spin.setValue(value_min)
         self.proactive_care_check.toggled.connect(self._update_care_controls)
+
+        # 情境感知（监听前台应用/进程）
+        self.context_aware_check = ToggleSwitch(self)
+        self.context_aware_check.setChecked(bool(self.config.get("context_aware_enabled", True)))
+        self.context_focus_check = ToggleSwitch(self)
+        self.context_focus_check.setChecked(bool(self.config.get("context_focus_enabled", False)))
+        ctx_rules = self.config.get("context_rules") or {}
+        if not isinstance(ctx_rules, dict):
+            ctx_rules = {}
+        self.context_meeting_edit = _rule_edit(ctx_rules.get("meeting"))
+        self.context_gaming_edit = _rule_edit(ctx_rules.get("gaming"))
+        self.context_work_edit = _rule_edit(ctx_rules.get("work"))
+        self.context_aware_check.toggled.connect(self._update_context_controls)
+
+    def _update_context_controls(self, enabled: bool) -> None:
+        for key, control in (
+            ("context_focus", self.context_focus_check),
+            ("context_meeting", self.context_meeting_edit),
+            ("context_gaming", self.context_gaming_edit),
+            ("context_work", self.context_work_edit),
+        ):
+            control.setEnabled(bool(enabled))
+            row = self.findChild(SettingRow, f"settingRow_{key}")
+            if row is not None:
+                row.setEnabled(bool(enabled))
 
     def _update_self_talk_controls(self, enabled: bool) -> None:
         keys = (
@@ -1679,6 +1742,13 @@ class ModernSettingsDialog(QDialog):
             "stuck_sec": int(round(self.care_stuck_spin.value() * 60)),
             "away_sec": int(round(self.care_away_spin.value() * 60)),
             "min_gap_sec": int(round(self.care_min_gap_spin.value() * 60)),
+        })
+        self.config.set("context_aware_enabled", self.context_aware_check.isChecked())
+        self.config.set("context_focus_enabled", self.context_focus_check.isChecked())
+        self.config.set("context_rules", {
+            "meeting": _rule_lines(self.context_meeting_edit),
+            "gaming": _rule_lines(self.context_gaming_edit),
+            "work": _rule_lines(self.context_work_edit),
         })
         self.config.set("context_menu_appearance", {
             "theme": self.menu_theme_select.currentData(),

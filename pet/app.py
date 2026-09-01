@@ -33,6 +33,7 @@ from .proactive_care import ProactiveCare
 from .library import MovieLibrary
 from .window import PetWindow
 from .work_state import WorkStateServer
+from .context_aware import ContextAwareMonitor
 from . import session_reader
 from . import emotion_actor
 from .fun_image_popup import restore_ojingjing_windows
@@ -89,6 +90,7 @@ class _WorkStateBridge(QObject):
     care_line = Signal(str)  # 主动关怀台词 → 主线程气泡
     office_root = Signal(object)  # 办公区推来的「主控鲸」状态 → 桌宠镜像
     handoff = Signal(object)      # 办公区触发「搬家」→ 走入/走回动画
+    context = Signal(str, object) # 情境感知：前台应用 → 桌宠行为（会议躲起/游戏安静）
 
     def __init__(self, controller) -> None:
         super().__init__()
@@ -99,6 +101,7 @@ class _WorkStateBridge(QObject):
         self.care_line.connect(self._apply_care_line)
         self.office_root.connect(self._apply_office_root)
         self.handoff.connect(self._apply_handoff)
+        self.context.connect(self._apply_context)
 
     def _apply(self, working: bool, detail: str) -> None:
         win = self.controller.win
@@ -127,13 +130,16 @@ class _WorkStateBridge(QObject):
                 logging.exception("emotion action 应用失败")
 
     def _apply_care_line(self, line: str) -> None:
-        """主动关怀台词 → 气泡（主线程）。"""
+        """主动关怀台词 → 气泡（主线程）。开会/游戏安静态不插嘴。"""
         win = self.controller.win
-        if win is not None and line:
-            try:
-                win.show_bubble(str(line), duration_ms=6000)
-            except Exception:
-                logging.exception("主动关怀气泡失败")
+        if win is None or not line:
+            return
+        if getattr(win, "is_quiet", lambda: False)():
+            return
+        try:
+            win.show_bubble(str(line), duration_ms=6000)
+        except Exception:
+            logging.exception("主动关怀气泡失败")
 
     def _apply_office_root(self, root) -> None:
         """办公区「主控鲸」实时状态 → 桌宠镜像（主线程）。"""
@@ -170,6 +176,15 @@ class _WorkStateBridge(QObject):
                                   label=str(info.get("label") or ""))
         except Exception:
             logging.exception("搬家动画应用失败")
+
+    def _apply_context(self, context: str, app) -> None:
+        """情境变化 → 桌宠行为（主线程）。"""
+        win = self.controller.win
+        if win is not None:
+            try:
+                win.apply_context(context, app)
+            except Exception:
+                logging.exception("情境感知应用失败")
 
 
 def _setup_logging(config: Config) -> None:
@@ -231,6 +246,10 @@ class PetApp:
         self._work_server: WorkStateServer | None = None
         self._ledger_timer: QTimer | None = None
         self._ledger_busy = False
+        # 情境感知（前台应用监听 → context 事件）
+        self._context_timer: QTimer | None = None
+        self._context_monitor: ContextAwareMonitor | None = None
+        self._context_busy = False
         # 情绪响应状态
         self._last_react_msg: str = ""
         self._last_react_ts: float = 0.0
@@ -250,6 +269,7 @@ class PetApp:
         self._apply_balance_timer()
         self._start_work_state()
         self._start_ledger_timer()
+        self._start_context_monitor()
         QTimer.singleShot(3500, self._check_autostart_wanted)
 
     # ------------------------------------------------------------ DSH 工作状态联动
@@ -392,6 +412,57 @@ class PetApp:
             return
         self._ledger_busy = True
         threading.Thread(target=self._ledger_worker, daemon=True, name="pet-ledger").start()
+
+    # ------------------------------------------------------------ 情境感知（前台应用监听）
+    def _start_context_monitor(self) -> None:
+        """每 2 秒探测一次前台应用 → 防抖后产出 context 事件（后台线程）。"""
+        if self._context_timer is not None:
+            return
+        self._context_monitor = ContextAwareMonitor(
+            on_change=self._on_context_change,
+            rules=self._context_rules,
+            enabled=self._context_enabled,
+            focus_override=self._context_focus_override,
+        )
+        timer = QTimer()
+        timer.setInterval(2000)
+        timer.timeout.connect(self._poll_context)
+        self._context_timer = timer
+        timer.start()
+        QTimer.singleShot(300, self._poll_context)  # 启动后立刻先跑一次
+
+    def _context_rules(self) -> dict | None:
+        """用户覆盖规则：非空才接管，否则回退内置默认。"""
+        raw = self.config.get("context_rules") or {}
+        if not isinstance(raw, dict):
+            return None
+        has_any = any(isinstance(v, list) and v for v in raw.values())
+        return raw if has_any else None
+
+    def _context_enabled(self) -> bool:
+        return bool(self.config.get("context_aware_enabled", True))
+
+    def _context_focus_override(self) -> bool:
+        return bool(self.config.get("context_focus_enabled", False))
+
+    def _poll_context(self) -> None:
+        if self._context_busy or self._context_monitor is None:
+            return
+        self._context_busy = True
+        threading.Thread(target=self._context_worker, daemon=True, name="pet-context").start()
+
+    def _context_worker(self) -> None:
+        try:
+            snap = self._context_monitor.sample()
+            # sample 已内部防抖 + 回调；changed 时 on_change 已在工作线程触发
+        except Exception:
+            logging.exception("情境探测异常")
+        finally:
+            self._context_busy = False
+
+    def _on_context_change(self, context: str, app: dict) -> None:
+        # 工作线程 → Qt 主线程（Signal 队列投递）
+        self._work_bridge.context.emit(context, app)
 
     def _ledger_worker(self) -> None:
         try:

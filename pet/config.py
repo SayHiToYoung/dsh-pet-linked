@@ -299,6 +299,9 @@ class Config:
             "token_period": "all",     # Token 花费时间筛选：all / day / week / month
             "proactive_care_enabled": True,   # 主动关怀总开关（久坐/深夜/卡住/欢迎回来）
             "proactive_care_thresholds": {},  # 主动关怀阈值覆盖（秒）：{long_work_sec/night_work_sec/stuck_sec/away_sec/min_gap_sec}；空=内置默认
+            "context_aware_enabled": True,    # 情境感知总开关（监听前台应用/进程）
+            "context_focus_enabled": False,   # 「别打扰我」手动开关：强制 focus 情境（躲起来）
+            "context_rules": {},              # 用户覆盖规则：{meeting/gaming/work: [关键词...]}；空=内置默认
         }
         self._load()
         self._normalize_pet_settings()
@@ -373,6 +376,7 @@ class Config:
             "token_display_fields", "token_display_scopes", "token_display_format",
             "token_pricing", "token_peak_hours", "token_period",
             "proactive_care_enabled", "proactive_care_thresholds",
+            "context_aware_enabled", "context_focus_enabled", "context_rules",
         ):
             if key in raw and raw[key] is not None:
                 self.data[key] = raw[key]
