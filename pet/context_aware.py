@@ -41,13 +41,21 @@ _CONTEXT_ORDER = (MEETING, GAMING, WORK, FOCUS, IDLE)
 
 DEFAULT_DEBOUNCE_SECONDS = 2.5
 
+# 纯会议 App（只会拿来开会，命中即开会）：这些应用一在前台就是开会。
+MEETING_APPS = ("wemeet", "腾讯会议", "tencent meeting", "zoom", "google meet")
+# 聊天+会议二合一工作 IM（钉钉 / Teams / 飞书 / 企业微信）：开在桌面≠开会，
+# 回个消息不该把桌宠藏起来。只有**窗口标题**带会议特征词才算开会；
+# 否则按工作 IM 陪伴处理（它们也在 WORK 规则里）。
+WORK_IM_TOKENS = ("钉钉", "dingtalk", "teams", "飞书", "feishu", "企业微信", "wecom")
+# 标题里的会议特征词：命中即视为「真在开会」。
+MEETING_TITLE_KEYWORDS = (
+    "会议", "视频会议", "音视频会议", "语音会议", "开会", "meeting", "conference",
+)
+
 # 每个情境的匹配关键词（小写后对「名称 + bundle id + 窗口标题」做子串匹配）。
 # 只有会「独占前台」的应用才该进表；进表越克制，误判越少。
 DEFAULT_RULES: dict[str, list[str]] = {
-    MEETING: [
-        "wemeet", "腾讯会议", "tencent meeting",
-        "zoom", "dingtalk", "钉钉", "teams", "飞书", "feishu", "google meet",
-    ],
+    MEETING: list(MEETING_APPS),
     GAMING: [
         "steam", "epic games", "battle.net", "wegame",
         "league of legends", "英雄联盟", "dota", "cs:go", "cs2",
@@ -63,6 +71,8 @@ DEFAULT_RULES: dict[str, list[str]] = {
         # 终端
         "terminal", "iterm", "alacritty", "wezterm", "konsole",
         "powershell", "cmd.exe", "windows terminal", "warp",
+        # 聊天+会议二合一工作 IM：开在桌面=工作陪伴（真开会靠标题特征词识别）
+        *WORK_IM_TOKENS,
         # 常见工作类
         "notion", "obsidian", "figma", "postman",
     ],
@@ -171,13 +181,32 @@ def _app_haystack(app: dict) -> str:
 
 
 def classify_context(app: dict, rules: dict | None = None) -> str:
-    """把前台应用身份归类为情境；命中优先级 meeting > gaming > work，否则 idle。"""
+    """把前台应用身份归类为情境；命中优先级 meeting > gaming > work，否则 idle。
+
+    关键：开会不只认「App 是谁」，还要认「窗口标题在开什么」——
+    钉钉/Teams/飞书 这种聊天+会议二合一的 App，光在前台≠开会。
+    回个消息不该把桌宠藏起来：只有**标题带会议特征词**（「会议」「meeting」…）
+    才算开会；否则按工作 IM 陪伴处理。纯会议 App（Zoom/腾讯会议）一在前台即开会。
+    """
+    if not isinstance(app, dict):
+        return IDLE
     haystack = _app_haystack(app)
     if not haystack:
         return IDLE
-    for ctx in _CONTEXT_ORDER:
-        if ctx in (FOCUS, IDLE):
-            continue
+    title = str(app.get("title") or "").lower()
+
+    # 1) 聊天+会议二合一工作 IM：标题带会议特征词 → 真在开会（否则落到工作 IM）
+    if any(token in haystack for token in WORK_IM_TOKENS):
+        if any(keyword in title for keyword in MEETING_TITLE_KEYWORDS):
+            return MEETING
+
+    # 2) 纯会议 App：一在前台即开会
+    for token in _lower_tokens(rules).get(MEETING, []):
+        if token in haystack:
+            return MEETING
+
+    # 3) 其余：gaming > work
+    for ctx in (GAMING, WORK):
         for token in _lower_tokens(rules).get(ctx, []):
             if token in haystack:
                 return ctx

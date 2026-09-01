@@ -32,6 +32,35 @@ def test_classify_does_not_produce_focus_from_apps():
     assert FOCUS not in {classify_context({"name": n}) for n in ("Steam", "Zoom", "Code")}
 
 
+def test_classify_dingtalk_chat_is_work_not_meeting():
+    # 钉钉是「聊天+会议」二合一：开钉钉回个消息 ≠ 开会，桌宠不该躲起来
+    assert classify_context({"name": "钉钉"}) == WORK          # 无标题（macOS 拿不到）
+    assert classify_context({"name": "钉钉", "title": "与张三的聊天"}) == WORK
+    assert classify_context({"name": "DingTalk", "title": "工作群"}) == WORK
+    assert classify_context({"name": "Teams"}) == WORK
+    assert classify_context({"name": "飞书", "title": "随便回条消息"}) == WORK
+
+
+def test_classify_dingtalk_real_meeting_by_title():
+    # 只有窗口标题带会议特征词，才算真在开会 → 桌宠才躲起来
+    assert classify_context({"name": "钉钉", "title": "产品评审会议"}) == MEETING
+    assert classify_context({"name": "钉钉", "title": "张三 的视频会议"}) == MEETING
+    assert classify_context({"name": "Teams", "title": "Standup Meeting"}) == MEETING
+
+
+def test_classify_pure_meeting_app_is_meeting_without_title():
+    # 纯会议 App（Zoom/腾讯会议）：一在前台就是开会，不靠标题
+    assert classify_context({"name": "Zoom"}) == MEETING
+    assert classify_context({"name": "腾讯会议"}) == MEETING
+    assert classify_context({"name": "WeMeet"}) == MEETING
+
+
+def test_classify_meeting_notes_in_work_app_is_not_meeting():
+    # 反向防误判：Notion 里开着标题带「会议」的文档，不是开会
+    assert classify_context({"name": "Notion", "title": "会议纪要"}) == WORK
+    assert classify_context({"name": "Visual Studio Code", "title": "会议.md"}) == WORK
+
+
 def test_monitor_commits_only_after_debounce():
     changes = []
     detector = {"app": {"name": "Zoom"}}
