@@ -1131,11 +1131,12 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == [
         "常规",
         "桌宠行为",
+        "情境感知",
         "外观",
         "快捷启动",
         "AI 设置",
     ]
-    assert dialog.pages.count() == 5
+    assert dialog.pages.count() == 6
     assert dialog.search_edit.placeholderText() == "搜索设置…"
     assert all(not dialog.sidebar.item(i).icon().isNull() for i in range(dialog.sidebar.count()))
     assert all(dialog.sidebar.item(i).sizeHint().height() >= 34 for i in range(dialog.sidebar.count()))
@@ -1189,9 +1190,10 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_autostart")) == 0
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_playback_speed")) == 1
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_self_talk_texts")) == 1
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_scale")) == 2
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_chat_ui_style")) == 2
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")) == 4
+    # 情境感知页插入「桌宠行为」之后 → 外观/AI 设置索引后移
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_scale")) == 3
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_chat_ui_style")) == 3
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")) == 5
     if settings_mod.sys.platform != "win32":
         assert dialog.auto_hide_fullscreen_check is None
         assert dialog.stream_capture_check is None
@@ -1453,7 +1455,7 @@ def test_modern_settings_search_locates_rows_and_return_does_not_close(tmp_path,
     dialog.search_edit.setFocus()
     dialog.search_edit.setText("API 地址")
     app.processEvents()
-    assert dialog.sidebar.currentRow() == 4
+    assert dialog.sidebar.currentRow() == 5  # AI 设置页在「情境感知」之后，索引后移
     api_row = dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")
     assert api_row.property("searchMatch") is True
     QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)

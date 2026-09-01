@@ -302,6 +302,8 @@ class Config:
             "context_aware_enabled": True,    # 情境感知总开关（监听前台应用/进程）
             "context_focus_enabled": False,   # 「别打扰我」手动开关：强制 focus 情境（躲起来）
             "context_rules": {},              # 用户覆盖规则：{meeting/gaming/work: [关键词...]}；空=内置默认
+            "meeting_care_enabled": True,     # 会议关怀总开关（按开会时长分档反馈）
+            "meeting_care_thresholds": [],    # 会议关怀档位（分钟）：[30,60,120]；空=内置默认
         }
         self._load()
         self._normalize_pet_settings()
@@ -377,6 +379,7 @@ class Config:
             "token_pricing", "token_peak_hours", "token_period",
             "proactive_care_enabled", "proactive_care_thresholds",
             "context_aware_enabled", "context_focus_enabled", "context_rules",
+            "meeting_care_enabled", "meeting_care_thresholds",
         ):
             if key in raw and raw[key] is not None:
                 self.data[key] = raw[key]

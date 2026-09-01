@@ -30,6 +30,7 @@ from .config import APP_DIR_NAME, Config
 from .harness_launcher import launch_harness_gui
 from .instance_launcher import launch_new_pet
 from .proactive_care import ProactiveCare
+from .meeting_care import MeetingCare
 from .library import MovieLibrary
 from .window import PetWindow
 from .work_state import WorkStateServer
@@ -259,6 +260,11 @@ class PetApp:
         # 主动关怀（久坐/深夜/卡住/欢迎回来）
         self._care = ProactiveCare(self.config.get("proactive_care_thresholds") or {})
         self._care_ticks: int = 0
+        # 会议关怀（按开会时长分档反馈）
+        self._meeting_care = MeetingCare(
+            self.config.get("meeting_care_thresholds") or None,
+            enabled=bool(self.config.get("meeting_care_enabled", True)),
+        )
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -454,6 +460,14 @@ class PetApp:
     def _context_worker(self) -> None:
         try:
             snap = self._context_monitor.sample()
+            # 会议关怀：按当前情境 tick（开会计时、散会结算补播台词）
+            if self._meeting_care.enabled:
+                result = self._meeting_care.tick(
+                    str(snap.get("context") or "idle"), time.monotonic()
+                )
+                if result:
+                    _, line = result
+                    self._work_bridge.care_line.emit(line)
             # sample 已内部防抖 + 回调；changed 时 on_change 已在工作线程触发
         except Exception:
             logging.exception("情境探测异常")
@@ -913,6 +927,7 @@ class PetApp:
             self.win.refresh_pet_settings()
         self._apply_balance_timer()
         self._reload_proactive_care()
+        self._reload_meeting_care()
         self._refresh_chat_windows()
         _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
 
@@ -922,6 +937,16 @@ class PetApp:
             self._care = ProactiveCare(self.config.get("proactive_care_thresholds") or {})
         except Exception:
             logging.exception("主动关怀配置重载失败")
+
+    def _reload_meeting_care(self) -> None:
+        """设置保存后重建会议关怀状态机（开关/档位即时生效，无需重启）。"""
+        try:
+            self._meeting_care = MeetingCare(
+                self.config.get("meeting_care_thresholds") or None,
+                enabled=bool(self.config.get("meeting_care_enabled", True)),
+            )
+        except Exception:
+            logging.exception("会议关怀配置重载失败")
 
     def _notify_pet_hidden(self) -> None:
         """用户主动隐藏桌宠后弹托盘提示，指明恢复入口。"""

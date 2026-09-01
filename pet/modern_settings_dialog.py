@@ -1105,6 +1105,12 @@ class ModernSettingsDialog(QDialog):
             SettingRow("context_gaming", "游戏应用", "命中即判定为「游戏」，桌宠安静待机不打扰。留空用内置默认。", self.context_gaming_edit, stacked=True),
             SettingRow("context_work", "工作应用", "命中即判定为「工作」，桌宠进入陪伴态。留空用内置默认。", self.context_work_edit, stacked=True),
         ], context_content))
+        context_layout.addWidget(SettingsSection("会议关怀", [
+            SettingRow("meeting_care", "会议关怀", "记录开会时长，散会后按开了多久体贴地反馈一句「辛苦啦」。", self.meeting_care_check),
+            SettingRow("meeting_care_level1", "第一档", "开会达到该时长，散会后触发第一档关怀。", self.meeting_care_level1),
+            SettingRow("meeting_care_level2", "第二档", "开会达到该时长，散会后触发第二档关怀。", self.meeting_care_level2),
+            SettingRow("meeting_care_level3", "第三档", "开会达到该时长，散会后触发第三档关怀。", self.meeting_care_level3),
+        ], context_content))
         context_layout.addStretch(1)
         self._add_page("情境感知", "screen", self._page_shell("情境感知", context_content))
 
@@ -1188,6 +1194,7 @@ class ModernSettingsDialog(QDialog):
         # 初始同步须在全部 SettingRow 构建完成后执行，否则 findChild 找不到行
         self._update_click_sound_controls(self.click_sound_check.isChecked())
         self._update_context_controls(self.context_aware_check.isChecked())
+        self._update_meeting_care_controls(self.meeting_care_check.isChecked())
 
         self.setStyleSheet(self._stylesheet())
 
@@ -1394,6 +1401,47 @@ class ModernSettingsDialog(QDialog):
         self.context_gaming_edit = _rule_edit(ctx_rules.get("gaming"))
         self.context_work_edit = _rule_edit(ctx_rules.get("work"))
         self.context_aware_check.toggled.connect(self._update_context_controls)
+
+        # 会议关怀（按开会时长分档反馈）
+        self.meeting_care_check = ToggleSwitch(self)
+        self.meeting_care_check.setChecked(bool(self.config.get("meeting_care_enabled", True)))
+        meeting_thresholds = self.config.get("meeting_care_thresholds") or [30, 60, 120]
+        if not isinstance(meeting_thresholds, list) or not meeting_thresholds:
+            meeting_thresholds = [30, 60, 120]
+        self.meeting_care_level1 = BrowserDoubleSpinBox(self)
+        self.meeting_care_level2 = BrowserDoubleSpinBox(self)
+        self.meeting_care_level3 = BrowserDoubleSpinBox(self)
+        for spin, value in (
+            (self.meeting_care_level1, meeting_thresholds[0]),
+            (self.meeting_care_level2, meeting_thresholds[1] if len(meeting_thresholds) > 1 else meeting_thresholds[0]),
+            (self.meeting_care_level3, meeting_thresholds[2] if len(meeting_thresholds) > 2 else meeting_thresholds[1] if len(meeting_thresholds) > 1 else meeting_thresholds[0]),
+        ):
+            spin.setRange(1, 480)
+            spin.setDecimals(0)
+            spin.setSingleStep(5.0)
+            spin.setSuffix(" 分钟")
+            spin.setValue(float(value))
+        self.meeting_care_check.toggled.connect(self._update_meeting_care_controls)
+
+    def _update_meeting_care_controls(self, enabled: bool) -> None:
+        for key, control in (
+            ("meeting_care_level1", self.meeting_care_level1),
+            ("meeting_care_level2", self.meeting_care_level2),
+            ("meeting_care_level3", self.meeting_care_level3),
+        ):
+            control.setEnabled(bool(enabled))
+            row = self.findChild(SettingRow, f"settingRow_{key}")
+            if row is not None:
+                row.setEnabled(bool(enabled))
+
+    def _meeting_care_thresholds(self) -> list[int]:
+        """把三个档位输入整理成升序去重的分钟列表（保序、非空）。"""
+        levels = sorted({
+            int(round(self.meeting_care_level1.value())),
+            int(round(self.meeting_care_level2.value())),
+            int(round(self.meeting_care_level3.value())),
+        })
+        return [max(1, v) for v in levels] or [30]
 
     def _update_context_controls(self, enabled: bool) -> None:
         for key, control in (
@@ -1750,6 +1798,8 @@ class ModernSettingsDialog(QDialog):
             "gaming": _rule_lines(self.context_gaming_edit),
             "work": _rule_lines(self.context_work_edit),
         })
+        self.config.set("meeting_care_enabled", self.meeting_care_check.isChecked())
+        self.config.set("meeting_care_thresholds", self._meeting_care_thresholds())
         self.config.set("context_menu_appearance", {
             "theme": self.menu_theme_select.currentData(),
             "density": self.menu_density_select.currentData(),
