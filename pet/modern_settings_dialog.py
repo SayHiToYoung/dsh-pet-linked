@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -1013,6 +1014,8 @@ class ModernSettingsDialog(QDialog):
         sidebar_layout.addWidget(self.sidebar, 1)
 
         self.pages = QStackedWidget(self)
+        self._sidebar_page_specs: list[tuple[str, str, int, str]] = []
+        self._sidebar_row_for_page: dict[int, int] = {}
         body.addWidget(sidebar_pane)
         body.addWidget(self.pages, 1)
         root.addLayout(body, 1)
@@ -1048,7 +1051,7 @@ class ModernSettingsDialog(QDialog):
                 SettingRow("balance_refresh", "余额自动刷新", "设置后台刷新间隔；0 分钟表示关闭。", self.balance_refresh_spin),
             ], general_content))
         general_layout.addStretch(1)
-        self._add_page("常规", "settings", self._page_shell("常规", general_content))
+        self._add_page("鲸鱼娘", "常规", "settings", self._page_shell("常规", general_content))
 
         behavior_content = QWidget()
         behavior_layout = QVBoxLayout(behavior_content)
@@ -1090,7 +1093,7 @@ class ModernSettingsDialog(QDialog):
             SettingRow("care_min_gap", "关怀最小间隔", "两条关怀之间至少间隔的时长。", self.care_min_gap_spin),
         ], behavior_content))
         behavior_layout.addStretch(1)
-        self._add_page("桌宠行为", "play", self._page_shell("桌宠行为", behavior_content))
+        self._add_page("鲸鱼娘", "桌宠行为", "play", self._page_shell("桌宠行为", behavior_content))
 
         context_content = QWidget()
         context_layout = QVBoxLayout(context_content)
@@ -1112,7 +1115,34 @@ class ModernSettingsDialog(QDialog):
             SettingRow("meeting_care_level3", "第三档", "开会达到该时长，散会后触发第三档关怀。", self.meeting_care_level3),
         ], context_content))
         context_layout.addStretch(1)
-        self._add_page("情境感知", "screen", self._page_shell("情境感知", context_content))
+        self._add_page("陪伴", "情境感知", "screen", self._page_shell("情境感知", context_content))
+
+        # ---- 主动识屏（上游移植）：仅 Windows + 有聊天能力时挂载 ----
+        if getattr(self, "_pro_built", False):
+            self._add_page("陪伴", "主动识屏", "camera", self._page_shell("主动识屏", self._proactive_page_content()))
+
+        # ---- Agent 联动（上游移植）----
+        agent_content = QWidget()
+        agent_layout = QVBoxLayout(agent_content)
+        agent_layout.setContentsMargins(0, 0, 0, 0)
+        agent_layout.setSpacing(16)
+        agent_layout.addWidget(SettingsSection("联动开关", [
+            SettingRow("agent_dsh", "DSH（DeepSeek Harness）", "感知 DeepSeek Harness 干活状态：开始/过程/完成。首次开启需安装桥接插件（本地、无网络）。", self.agent_dsh_check),
+            SettingRow("agent_claude", "Claude Code", "向 ~/.claude/settings.json 注入官方事件 hooks（可随时关闭自动移除）。", self.agent_claude_check),
+            SettingRow("agent_cursor", "Cursor", "直接读取 Cursor 的 agent-transcripts 事件，无需安装。", self.agent_cursor_check),
+            SettingRow("agent_opencode", "OpenCode", "直接只读 OpenCode 本地 SQLite 事件库，无需安装。", self.agent_opencode_check),
+        ], agent_content))
+        agent_layout.addWidget(SettingsSection("气泡通知", [
+            SettingRow("agent_notify_state", "开始干活提醒", "Agent 开始工作时冒一句「开始干活啦～」（默认关）。", self.agent_notify_state_check),
+            SettingRow("agent_notify_done", "任务完成通知", "Agent 干完活后提醒「去看看成果吧」（默认开）。", self.agent_notify_done_check),
+            SettingRow("agent_notify_activity", "过程汇报", "干活中报「正在读文件/跑命令/改代码…」（默认关）。", self.agent_notify_activity_check),
+        ], agent_content))
+        agent_layout.addWidget(SettingsSection("提示音效", [
+            SettingRow("agent_sound", "Agent 音效联动", "开始工作/任务完成/报错时播放提示音。", self.agent_sound_check),
+            SettingRow("agent_sound_volume", "音效音量", "调整 Agent 提示音音量。", self.agent_sound_volume_spin),
+        ], agent_content))
+        agent_layout.addStretch(1)
+        self._add_page("连接", "Agent 联动", "link", self._page_shell("Agent 联动", agent_content))
 
         appearance_content = QWidget()
         appearance_layout = QVBoxLayout(appearance_content)
@@ -1155,7 +1185,7 @@ class ModernSettingsDialog(QDialog):
             SettingRow("egg_image_dir", "弹窗图片目录", "使用绝对路径；每次点击会随机选择一张图片。", self.egg_image_dir_picker),
         ], appearance_content))
         appearance_layout.addStretch(1)
-        self._add_page("外观", "appearance", self._page_shell("外观", appearance_content))
+        self._add_page("鲸鱼娘", "外观", "appearance", self._page_shell("外观", appearance_content))
 
         launcher_content = QWidget()
         launcher_layout = QVBoxLayout(launcher_content)
@@ -1175,13 +1205,14 @@ class ModernSettingsDialog(QDialog):
             ),
         ], launcher_content))
         launcher_layout.addStretch(1)
-        self._add_page("快捷启动", "application", self._page_shell("快捷启动", launcher_content))
+        self._add_page("工具与实验", "快捷启动", "application", self._page_shell("快捷启动", launcher_content))
 
         if self.ai_page is not None:
-            self._add_page("AI 设置", "chat", self._page_shell("AI 设置", self.ai_page))
+            self._add_page("陪伴", "AI 设置", "chat", self._page_shell("AI 设置", self.ai_page))
 
-        self.sidebar.currentRowChanged.connect(self.pages.setCurrentIndex)
-        self.sidebar.setCurrentRow(0)
+        self._build_sidebar()
+        self.sidebar.currentRowChanged.connect(self._on_sidebar_row_changed)
+        self._select_page(0)
         self._search_rows = self.findChildren(SettingRow)
         self._search_matches: list[SettingRow] = []
         self._search_index = -1
@@ -1423,6 +1454,52 @@ class ModernSettingsDialog(QDialog):
             spin.setValue(float(value))
         self.meeting_care_check.toggled.connect(self._update_meeting_care_controls)
 
+        # ---- 主动识屏（上游 proactive.py 移植；仅 Windows + 有聊天能力时挂载）----
+        self._pro_built = False
+        self.pro_enabled_check = None
+        self.pro_dryrun_check = None
+        self.pro_preset_select = None
+        self.pro_dwell_spin = None
+        self.pro_cooldown_spin = None
+        self.pro_cooldown_unit = None
+        self.pro_min_interval_spin = None
+        self.pro_cap_spin = None
+        self.pro_idle_check = None
+        self.pro_idle_spin = None
+        self.pro_through_check = None
+        self.pro_precue_check = None
+        self.pro_free_check = None
+        self.pro_whitelist_edit = None
+        self.pro_add_btn = None
+        self.pro_clear_mem_btn = None
+        if sys.platform == "win32" and self.include_ai:
+            self._build_proactive_controls()
+
+        # ---- Agent 联动（上游 agent_link.py 移植）----
+        self.agent_link_cfg = dict(self.config.get("agent_link") or {})
+        self.agent_dsh_check = ToggleSwitch(self)
+        self.agent_dsh_check.setChecked(bool(self.agent_link_cfg.get("dsh", False)))
+        self.agent_claude_check = ToggleSwitch(self)
+        self.agent_claude_check.setChecked(bool(self.agent_link_cfg.get("claude", False)))
+        self.agent_cursor_check = ToggleSwitch(self)
+        self.agent_cursor_check.setChecked(bool(self.agent_link_cfg.get("cursor", False)))
+        self.agent_opencode_check = ToggleSwitch(self)
+        self.agent_opencode_check.setChecked(bool(self.agent_link_cfg.get("opencode", False)))
+        self.agent_notify_state_check = ToggleSwitch(self)
+        self.agent_notify_state_check.setChecked(bool(self.agent_link_cfg.get("notify_state", False)))
+        self.agent_notify_done_check = ToggleSwitch(self)
+        self.agent_notify_done_check.setChecked(bool(self.agent_link_cfg.get("notify_done", True)))
+        self.agent_notify_activity_check = ToggleSwitch(self)
+        self.agent_notify_activity_check.setChecked(bool(self.agent_link_cfg.get("notify_activity", False)))
+        self.agent_sound_check = ToggleSwitch(self)
+        self.agent_sound_check.setChecked(bool(self.agent_link_cfg.get("sound_enabled", False)))
+        self.agent_sound_volume_spin = BrowserSpinBox(self)
+        self.agent_sound_volume_spin.setRange(0, 100)
+        self.agent_sound_volume_spin.setSuffix(" %")
+        self.agent_sound_volume_spin.setValue(int(round(float(self.agent_link_cfg.get("sound_volume", 0.65)) * 100)))
+        self.agent_sound_check.toggled.connect(self._update_agent_sound_controls)
+        self._update_agent_sound_controls(self.agent_sound_check.isChecked())
+
     def _update_meeting_care_controls(self, enabled: bool) -> None:
         for key, control in (
             ("meeting_care_level1", self.meeting_care_level1),
@@ -1433,6 +1510,225 @@ class ModernSettingsDialog(QDialog):
             row = self.findChild(SettingRow, f"settingRow_{key}")
             if row is not None:
                 row.setEnabled(bool(enabled))
+
+    def _update_agent_sound_controls(self, enabled: bool) -> None:
+        """Agent 音效音量随总开关联动。"""
+        self.agent_sound_volume_spin.setEnabled(bool(enabled))
+        row = self.findChild(SettingRow, "settingRow_agent_sound_volume")
+        if row is not None:
+            row.setEnabled(bool(enabled))
+
+    def _build_proactive_controls(self) -> None:
+        """主动识屏页控件（仅 Windows + 有聊天能力时挂载）。"""
+        from .proactive import effective_proactive_config
+
+        pro = effective_proactive_config(self.config.get("proactive_screen", {}))
+        self._pro_built = True
+
+        self.pro_enabled_check = ToggleSwitch(self)
+        self.pro_enabled_check.setChecked(bool(pro["enabled"]))
+        self.pro_dryrun_check = ToggleSwitch(self)
+        self.pro_dryrun_check.setChecked(bool(pro["dry_run"]))
+
+        self.pro_preset_select = ModernSelect(self, width=160)
+        for key, label in (
+            ("balanced", "平衡（推荐）"),
+            ("quiet", "安静"),
+            ("active", "活跃"),
+            ("custom", "自定义参数"),
+        ):
+            self.pro_preset_select.addItem(label, key)
+        idx = {"quiet": 1, "balanced": 0, "active": 2, "custom": 3}.get(pro["preset"], 0)
+        self.pro_preset_select.setCurrentIndex(idx)
+        self.pro_preset_select.currentIndexChanged.connect(self._on_pro_preset_changed)
+
+        self.pro_dwell_spin = BrowserSpinBox(self)
+        self.pro_dwell_spin.setRange(15, 600)
+        self.pro_dwell_spin.setValue(int(pro["dwell_seconds"]))
+
+        self.pro_cooldown_spin = BrowserDoubleSpinBox(self)
+        self.pro_cooldown_spin.setRange(0.5, 7200)
+        self.pro_cooldown_spin.setDecimals(2)
+        self.pro_cooldown_unit = ModernSelect(self, width=80)
+        self.pro_cooldown_unit.addItem("分钟", "min")
+        self.pro_cooldown_unit.addItem("秒", "sec")
+        self._pro_set_cooldown_display(float(pro["cooldown_minutes"]))
+        self.pro_cooldown_unit.currentIndexChanged.connect(self._on_pro_cooldown_unit_changed)
+
+        self.pro_min_interval_spin = BrowserSpinBox(self)
+        self.pro_min_interval_spin.setRange(30, 3600)
+        self.pro_min_interval_spin.setValue(int(pro["min_request_interval_seconds"]))
+
+        self.pro_cap_spin = BrowserSpinBox(self)
+        self.pro_cap_spin.setRange(1, 9999)
+        self.pro_cap_spin.setValue(int(pro["daily_cap"]))
+
+        self.pro_idle_check = ToggleSwitch(self)
+        self.pro_idle_check.setChecked(bool(pro["require_idle"]))
+        self.pro_idle_spin = BrowserSpinBox(self)
+        self.pro_idle_spin.setRange(5, 3600)
+        raw_idle = (self.config.get("proactive_screen", {}) or {}).get("min_idle_seconds", 30)
+        self.pro_idle_spin.setValue(int(raw_idle or 30))
+
+        self.pro_through_check = ToggleSwitch(self)
+        self.pro_through_check.setChecked(bool(pro["allow_when_mouse_through"]))
+        self.pro_precue_check = ToggleSwitch(self)
+        self.pro_precue_check.setChecked(bool(pro["pre_cue"]))
+        self.pro_free_check = ToggleSwitch(self)
+        self.pro_free_check.setChecked(bool(pro["prefer_free_provider"]))
+
+        self.pro_whitelist_edit = QPlainTextEdit(self)
+        self.pro_whitelist_edit.setPlaceholderText("msedge.exe\ntitle:*会议*")
+        self.pro_whitelist_edit.setPlainText("\n".join(str(x) for x in pro["whitelist"]))
+        self.pro_whitelist_edit.setMinimumHeight(72)
+
+        self.pro_add_btn = QPushButton("从当前前台窗口添加…", self)
+        self.pro_add_btn.setProperty("variant", "ghost")
+        self.pro_add_btn.clicked.connect(self._on_pro_add_foreground)
+        self._pro_add_timer = QTimer(self)
+        self._pro_add_timer.setSingleShot(True)
+        self._pro_add_timer.timeout.connect(self._do_pro_add_foreground)
+
+        self.pro_clear_mem_btn = QPushButton("清除陪伴记忆", self)
+        self.pro_clear_mem_btn.setProperty("variant", "ghost")
+        self.pro_clear_mem_btn.clicked.connect(self._on_pro_clear_memory)
+
+    def _pro_set_cooldown_display(self, minutes: float) -> None:
+        unit = "sec" if minutes < 1 else "min"
+        self._pro_apply_cooldown_unit(unit, minutes)
+
+    def _pro_apply_cooldown_unit(self, unit: str, minutes: float) -> None:
+        self.pro_cooldown_unit.blockSignals(True)
+        self.pro_cooldown_unit.setCurrentIndex(1 if unit == "sec" else 0)
+        if unit == "sec":
+            self.pro_cooldown_spin.setRange(30, 7200)
+            self.pro_cooldown_spin.setDecimals(0)
+            self.pro_cooldown_spin.setValue(min(7200, max(30, round(minutes * 60))))
+        else:
+            self.pro_cooldown_spin.setRange(0.5, 120)
+            self.pro_cooldown_spin.setDecimals(2)
+            self.pro_cooldown_spin.setValue(min(120.0, max(0.5, minutes)))
+        self._pro_cooldown_last_unit = unit
+        self.pro_cooldown_unit.blockSignals(False)
+
+    def _on_pro_cooldown_unit_changed(self) -> None:
+        old = getattr(self, "_pro_cooldown_last_unit", "min")
+        v = float(self.pro_cooldown_spin.value())
+        minutes = v / 60.0 if old == "sec" else v
+        self._pro_apply_cooldown_unit(self.pro_cooldown_unit.currentData(), minutes)
+
+    def _pro_cooldown_minutes(self) -> float:
+        v = float(self.pro_cooldown_spin.value())
+        return v / 60.0 if self.pro_cooldown_unit.currentData() == "sec" else v
+
+    def _on_pro_preset_changed(self, _index: int) -> None:
+        from .proactive import PRESET_DEFAULTS
+        vals = PRESET_DEFAULTS.get(self.pro_preset_select.currentData())
+        if vals:
+            self.pro_dwell_spin.setValue(vals["dwell_seconds"])
+            self._pro_set_cooldown_display(float(vals["cooldown_minutes"]))
+            self.pro_cap_spin.setValue(vals["daily_cap"])
+
+    def _on_pro_add_foreground(self) -> None:
+        self.pro_add_btn.setEnabled(False)
+        self.pro_add_btn.setText("请在 3 秒内切换到目标窗口…")
+        self._pro_add_timer.start(3000)
+
+    def _do_pro_add_foreground(self) -> None:
+        self.pro_add_btn.setEnabled(True)
+        self.pro_add_btn.setText("从当前前台窗口添加…")
+        from . import vision
+        info = vision.foreground_window_info()
+        if not info:
+            QMessageBox.information(self, "添加前台窗口", "未能检测到有效的前台窗口，请将目标软件置顶后再试。")
+            return
+        proc = str(info.get("process", "")).strip()
+        title = str(info.get("title", "")).strip()
+        box = QMessageBox(self)
+        box.setWindowTitle("添加到白名单")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(
+            f"检测到前台窗口：\n进程：{proc or '（未知）'}\n标题：{title or '（空）'}\n\n要按哪种方式关注它？"
+        )
+        btn_proc = box.addButton("按软件（推荐）", QMessageBox.ButtonRole.AcceptRole)
+        btn_title = box.addButton("按标题关键词", QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        lines = [x.strip() for x in self.pro_whitelist_edit.toPlainText().splitlines() if x.strip()]
+        if box.clickedButton() is btn_proc and proc and proc not in lines:
+            lines.append(proc)
+        elif box.clickedButton() is btn_title and title:
+            rule = f"title:*{title}*"
+            if rule not in lines:
+                lines.append(rule)
+        else:
+            return
+        self.pro_whitelist_edit.setPlainText("\n".join(lines))
+
+    def _on_pro_clear_memory(self) -> None:
+        from .proactive import ProactiveMemory
+        ProactiveMemory(self.config.dir / "proactive_screen_memory.json").clear()
+        QMessageBox.information(self, "陪伴记忆", "已清空主动识屏的短期陪伴记忆。")
+
+    def _proactive_page_content(self) -> QWidget:
+        content = QWidget(self)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(18)
+        layout.addWidget(SettingsSection("总开关与节奏", [
+            SettingRow("proactive_enabled", "开启主动识屏",
+                       "她会偶尔看一眼你在用的软件并说句话。截图只在内存处理、不落盘、不写入会话。",
+                       self.pro_enabled_check),
+            SettingRow("proactive_dry_run", "dry-run 验证模式",
+                       "开启后满足条件只写日志、不调用模型、不消耗额度。", self.pro_dryrun_check),
+            SettingRow("proactive_preset", "陪伴节奏预设",
+                       "平衡 45s/5min/15次；安静 90s/10min/8次；活跃 20s/3min/25次（停留/冷却/每日上限）。",
+                       self.pro_preset_select),
+        ], content))
+        layout.addWidget(SettingsSection("频率参数（自定义预设时生效）", [
+            SettingRow("proactive_dwell", "窗口停留门限（秒）", "同一前台窗口持续停留该时长才可能触发。",
+                       self.pro_dwell_spin),
+            SettingRow("proactive_cooldown", "关怀冷却间隔", "两次关怀的最短间隔，支持秒/分钟。",
+                       self._pro_cooldown_row()),
+            SettingRow("proactive_min_interval", "最小请求间隔（秒）", "免费模型的硬保护，不建议调太小。",
+                       self.pro_min_interval_spin),
+            SettingRow("proactive_daily_cap", "每日请求上限", "DeepSeek 视觉单次约 ¥0.003；上限 9999 约等于不限。",
+                       self.pro_cap_spin),
+        ], content))
+        layout.addWidget(SettingsSection("触发条件", [
+            SettingRow("proactive_require_idle", "仅当我闲置时触发", "勾选后，敲键盘/动鼠标时不打扰。",
+                       self.pro_idle_check),
+            SettingRow("proactive_idle_seconds", "闲置判定秒数", "勾选上方后，闲置该秒数才触发。",
+                       self.pro_idle_spin),
+            SettingRow("proactive_through", "鼠标穿透时仍识屏", "桌宠处于鼠标穿透状态时是否继续工作。",
+                       self.pro_through_check),
+            SettingRow("proactive_pre_cue", "触发前先兆提示", "触发前先冒一句「让我看看……」。",
+                       self.pro_precue_check),
+            SettingRow("proactive_free", "识屏优先用独立视觉配置", "开：服务商配了独立视觉端点（如免费的智谱 GLM-4.6V-Flash）时识屏走它；关：始终跟随聊天模型。",
+                       self.pro_free_check),
+        ], content))
+        layout.addWidget(SettingsSection("白名单", [
+            SettingRow("proactive_whitelist",
+                       "白名单（每行一条）",
+                       "进程名（如 msedge.exe）= 关注这个软件；title:关键词 = 只关注标题含该词的窗口。留空 = 不识屏。",
+                       self.pro_whitelist_edit, stacked=True),
+            SettingRow("proactive_whitelist_add", "快捷添加",
+                       "点击后 3 秒内切换到目标窗口，自动采样进程名/标题。", self.pro_add_btn),
+            SettingRow("proactive_memory_clear", "陪伴记忆",
+                       "只存进程名和活动分类（不落标题、不存截图），可随时清空。",
+                       self.pro_clear_mem_btn),
+        ], content))
+        layout.addStretch(1)
+        return content
+
+    def _pro_cooldown_row(self) -> QWidget:
+        row = QWidget(self)
+        h = QHBoxLayout(row)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(8)
+        h.addWidget(self.pro_cooldown_spin)
+        h.addWidget(self.pro_cooldown_unit)
+        return row
 
     def _meeting_care_thresholds(self) -> list[int]:
         """把三个档位输入整理成升序去重的分钟列表（保序、非空）。"""
@@ -1562,11 +1858,50 @@ class ModernSettingsDialog(QDialog):
         layout.addWidget(scroll, 1)
         return page
 
-    def _add_page(self, label: str, icon_name: str, page: QWidget) -> None:
-        item = QListWidgetItem(vector_widget_icon(self, icon_name, 16), label)
-        item.setSizeHint(QSize(0, 34))
-        self.sidebar.addItem(item)
-        self.pages.addWidget(page)
+    def _add_page(self, group: str, label: str, icon_name: str, page: QWidget) -> None:
+        page_index = self.pages.addWidget(page)
+        self._sidebar_page_specs.append((group, label, page_index, icon_name))
+
+    def _build_sidebar(self) -> None:
+        """Render page links under stable product-level groups."""
+        specs_by_group: dict[str, list[tuple[str, int, str]]] = {}
+        for group, label, page_index, icon_name in self._sidebar_page_specs:
+            specs_by_group.setdefault(group, []).append((label, page_index, icon_name))
+
+        for group in ("鲸鱼娘", "陪伴", "连接", "工具与实验"):
+            specs = specs_by_group.get(group, [])
+            if not specs:
+                continue
+            heading = QListWidgetItem(group)
+            heading.setData(Qt.ItemDataRole.UserRole + 1, "group")
+            heading.setFlags(heading.flags() & ~Qt.ItemFlag.ItemIsSelectable & ~Qt.ItemFlag.ItemIsEnabled)
+            heading.setSizeHint(QSize(0, 24))
+            heading_font = heading.font()
+            heading_font.setBold(True)
+            heading_font.setPixelSize(11)
+            heading.setFont(heading_font)
+            heading.setForeground(QColor("#85898f"))
+            self.sidebar.addItem(heading)
+            for label, page_index, icon_name in specs:
+                item = QListWidgetItem(vector_widget_icon(self, icon_name, 16), label)
+                item.setData(Qt.ItemDataRole.UserRole, page_index)
+                item.setSizeHint(QSize(0, 34))
+                self.sidebar.addItem(item)
+                self._sidebar_row_for_page[page_index] = self.sidebar.row(item)
+
+    def _on_sidebar_row_changed(self, row: int) -> None:
+        item = self.sidebar.item(row)
+        if item is None:
+            return
+        page_index = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(page_index, int):
+            self.pages.setCurrentIndex(page_index)
+
+    def _select_page(self, page_index: int) -> None:
+        row = self._sidebar_row_for_page.get(page_index)
+        if row is not None:
+            self.sidebar.setCurrentRow(row)
+            self.pages.setCurrentIndex(page_index)
 
     def _clear_search_matches(self) -> None:
         for row in self._search_rows:
@@ -1607,7 +1942,7 @@ class ModernSettingsDialog(QDialog):
             if self.pages.widget(index).isAncestorOf(row):
                 page_index = index
                 break
-        self.sidebar.setCurrentRow(page_index)
+        self._select_page(page_index)
         page = self.pages.widget(page_index)
         scroll = page.findChild(QScrollArea, "settingsScroll")
         if scroll is not None:
@@ -1800,6 +2135,48 @@ class ModernSettingsDialog(QDialog):
         })
         self.config.set("meeting_care_enabled", self.meeting_care_check.isChecked())
         self.config.set("meeting_care_thresholds", self._meeting_care_thresholds())
+        # 主动识屏（上游移植）：仅在 Windows 挂载控件时落盘；合并写回保留未暴露键
+        if getattr(self, "_pro_built", False):
+            from .proactive import PRESET_DEFAULTS
+            pro_data = dict(self.config.get("proactive_screen", {}) or {})
+            preset = self.pro_preset_select.currentData()
+            # 非 custom 预设下改了数值 → 自动落为 custom，否则运行时会被预设覆盖
+            if preset in PRESET_DEFAULTS:
+                pv = PRESET_DEFAULTS[preset]
+                if (self.pro_dwell_spin.value() != pv["dwell_seconds"]
+                        or abs(self._pro_cooldown_minutes() - pv["cooldown_minutes"]) > 1e-6
+                        or self.pro_cap_spin.value() != pv["daily_cap"]):
+                    preset = "custom"
+            pro_data.update({
+                "enabled": self.pro_enabled_check.isChecked(),
+                "dry_run": self.pro_dryrun_check.isChecked(),
+                "preset": preset,
+                "dwell_seconds": self.pro_dwell_spin.value(),
+                "cooldown_minutes": self._pro_cooldown_minutes(),
+                "min_request_interval_seconds": self.pro_min_interval_spin.value(),
+                "daily_cap": self.pro_cap_spin.value(),
+                "require_idle": self.pro_idle_check.isChecked(),
+                "min_idle_seconds": self.pro_idle_spin.value(),
+                "allow_when_mouse_through": self.pro_through_check.isChecked(),
+                "pre_cue": self.pro_precue_check.isChecked(),
+                "prefer_free_provider": self.pro_free_check.isChecked(),
+                "whitelist": [x.strip() for x in self.pro_whitelist_edit.toPlainText().splitlines() if x.strip()],
+            })
+            self.config.set("proactive_screen", pro_data)
+        # Agent 联动（上游移植）：合并写回，不覆盖 agent_link 其他键（thinking_texts/custom_agents 等）
+        agent_cfg = dict(self.config.get("agent_link") or {})
+        agent_cfg.update({
+            "dsh": self.agent_dsh_check.isChecked(),
+            "claude": self.agent_claude_check.isChecked(),
+            "cursor": self.agent_cursor_check.isChecked(),
+            "opencode": self.agent_opencode_check.isChecked(),
+            "notify_state": self.agent_notify_state_check.isChecked(),
+            "notify_done": self.agent_notify_done_check.isChecked(),
+            "notify_activity": self.agent_notify_activity_check.isChecked(),
+            "sound_enabled": self.agent_sound_check.isChecked(),
+            "sound_volume": self.agent_sound_volume_spin.value() / 100.0,
+        })
+        self.config.set("agent_link", agent_cfg)
         self.config.set("context_menu_appearance", {
             "theme": self.menu_theme_select.currentData(),
             "density": self.menu_density_select.currentData(),

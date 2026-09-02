@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-"""Modern context-menu layout with seven explicit functional groups."""
+"""Modern context-menu layout grouped around the companion's four roles."""
 from __future__ import annotations
+
+import sys
 
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMenu
@@ -9,6 +11,7 @@ from .fun_entry import add_ojingjing_entry
 from .quick_launch import add_quick_launch_menu
 from .shared import (
     add_action,
+    add_agent_link_menu,
     add_autostart,
     add_drag_physics,
     add_hide_pet,
@@ -18,6 +21,7 @@ from .shared import (
     add_harness,
     add_no_move,
     add_on_top,
+    add_proactive_menu,
     add_quit,
     add_return_corner,
     add_spawn_pet,
@@ -32,7 +36,7 @@ from .shared import (
 
 
 def build_modern_menu(menu: QMenu, pet, template: dict) -> None:
-    """Build the modern layout without importing or mutating legacy UI code."""
+    """Build a compact modern layout without removing any existing capability."""
     def start_group() -> None:
         actions = menu.actions()
         if actions and not actions[-1].isSeparator():
@@ -44,46 +48,54 @@ def build_modern_menu(menu: QMenu, pet, template: dict) -> None:
         add_ojingjing_entry(menu, easter_egg)
         menu.addSeparator()
 
-    # 1. 交互：AI 对话按设置选择现代/经典窗口。
+    # 最常用的对话入口保持一级可达。
     chat = getattr(pet, "on_open_chat", None)
     if chat is not None:
         add_action(menu, "AI 对话", "chat", chat, close_on_trigger=True)
-    add_look_screen(menu, pet)
 
-    # 2. 播放。
+    # 鲸鱼娘：只放角色本身的外观、动作与桌面行为。
     start_group()
-    animations = add_submenu(menu, "播放动画", "play")
+    whale = add_submenu(menu, "鲸鱼娘", "play")
+    animations = add_submenu(whale, "播放动画", "play")
     build_animation_categories(animations, pet, icons=False, leaf_role_icons=True)
-    build_character_menu(menu, pet)
+    build_character_menu(whale, pet)
+    build_speed_menu(whale, pet)
+    build_size_menu(whale, pet)
+    add_drag_physics(whale, pet)
+    add_return_corner(whale, pet)
+    add_no_move(whale, pet)
+    add_on_top(whale, pet)
+    add_autostart(whale, pet)
+    add_spawn_pet(whale, pet)
 
-    # 3. 功能：直接铺在一级菜单，分隔线承担分类职责。
+    # 陪伴：她如何感知并回应当前用户。
+    companion = add_submenu(menu, "陪伴与感知", "screen")
+    add_look_screen(companion, pet)
+    # 主动识屏（上游移植）：仅 Windows + 有聊天能力时挂载。
+    if sys.platform == "win32" and getattr(pet, "proactive_watcher", None) is not None:
+        add_proactive_menu(companion, pet)
+
+    # 连接：她进入其他 Agent 工作现场的入口。
+    if getattr(pet, "agent_link_manager", None) is not None:
+        connection = add_submenu(menu, "连接", "link")
+        add_agent_link_menu(connection, pet)
+
+    # 工具与实验：保留全部辅助能力，但不再抢占一级菜单。
+    tools = add_submenu(menu, "工具与实验", "tools")
+    add_balance(tools, pet)
+    add_action(tools, "Token 花费统计", "tools", lambda: pet.show_token_cost(), close_on_trigger=True)
+    add_action(tools, "Token 花费设置", "tools", lambda: pet.open_token_cost_settings(), close_on_trigger=True)
+    add_harness(tools, pet)
+    add_deepseek_web(tools)
+    add_quick_launch_menu(tools, pet.cfg)
+    add_update_help(tools, pet)
+
+    # 高频窗口操作仍保持一级可达。
     start_group()
-    build_speed_menu(menu, pet)
-    build_size_menu(menu, pet)
-    add_drag_physics(menu, pet)
-    add_return_corner(menu, pet)
     add_hide_pet(menu, pet)
-    add_no_move(menu, pet)
-    add_on_top(menu, pet)
-    add_autostart(menu, pet)
-    add_spawn_pet(menu, pet)
-
-    # 4. 工具：同样直接显示，避免为了两个动作增加一级导航。
-    start_group()
-    add_balance(menu, pet)
-    add_action(menu, "Token 花费统计", "tools", lambda: pet.show_token_cost(), close_on_trigger=True)
-    add_action(menu, "Token 花费设置", "tools", lambda: pet.open_token_cost_settings(), close_on_trigger=True)
-    add_harness(menu, pet)
-    add_deepseek_web(menu)
-    add_quick_launch_menu(menu, pet.cfg)
-    add_update_help(menu, pet)
-
-    # 5. 现代桌宠设置面板（包含 AI 设置侧栏页）。
-    start_group()
     modern_settings = getattr(pet, "on_open_modern_settings", None)
     if modern_settings is not None:
         add_action(menu, "桌宠设置", "settings", modern_settings, close_on_trigger=True)
 
-    # 6. 退出。
     start_group()
     add_quit(menu, pet)

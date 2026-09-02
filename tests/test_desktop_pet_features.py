@@ -585,7 +585,8 @@ def test_modern_pet_context_menu_has_spawn_action_with_avatar_icon(monkeypatch):
 
     direct_actions = [action for action in menu.actions() if not action.isSeparator()]
     assert direct_actions
-    spawn_action = next(action for action in direct_actions if action.text() == "生小肥鱼")
+    whale_menu = next(action.menu() for action in direct_actions if action.text() == "鲸鱼娘")
+    spawn_action = next(action for action in whale_menu.actions() if action.text() == "生小肥鱼")
     assert not spawn_action.icon().isNull()
     spawn_action.trigger()
     assert pet.spawn_count == 1
@@ -751,27 +752,42 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
     assert labels == [
         "厉害了我的鲸",
         "AI 对话",
-        "看看屏幕",
+        "鲸鱼娘",
+        "陪伴与感知",
+        "连接",
+        "工具与实验",
+        "隐藏桌宠",
+        "桌宠设置",
+        "退出",
+    ]
+    whale = next(action.menu() for action in menu.actions() if action.text() == "鲸鱼娘")
+    assert [action.text() for action in whale.actions()] == [
         "播放动画",
         "切换角色",
         "播放速率",
         "大小",
         "拖动物理",
         "回到右下角",
-        "隐藏桌宠",
         "不移动",
         "窗口置顶",
         "开机自启",
         "生小肥鱼",
+    ]
+    companion = next(action.menu() for action in menu.actions() if action.text() == "陪伴与感知")
+    assert [action.text() for action in companion.actions()] == ["看看屏幕"]
+    connection = next(action.menu() for action in menu.actions() if action.text() == "连接")
+    assert [action.text() for action in connection.actions()] == ["Agent 联动"]
+    tools = next(action.menu() for action in menu.actions() if action.text() == "工具与实验")
+    assert [action.text() for action in tools.actions()] == [
         "DeepSeek 余额",
+        "Token 花费统计",
+        "Token 花费设置",
         "启动 DeepSeek Harness",
         "打开网页版 DeepSeek",
         "快捷启动",
         "更新与帮助",
-        "桌宠设置",
-        "退出",
     ]
-    animation_action = next(action for action in menu.actions() if action.text() == "播放动画")
+    animation_action = next(action for action in whale.actions() if action.text() == "播放动画")
     assert animation_action.menu() is not None
     assert [action.text() for action in animation_action.menu().actions()] == [
         "待机",
@@ -780,9 +796,9 @@ def test_modern_context_menu_has_compact_semantic_groups(monkeypatch):
         "点击回应",
         "随机动作",
     ]
-    assert next(action for action in menu.actions() if action.text() == "播放速率").menu() is not None
-    assert next(action for action in menu.actions() if action.text() == "大小").menu() is not None
-    next(action for action in menu.actions() if action.text() == "打开网页版 DeepSeek").trigger()
+    assert next(action for action in whale.actions() if action.text() == "播放速率").menu() is not None
+    assert next(action for action in whale.actions() if action.text() == "大小").menu() is not None
+    next(action for action in tools.actions() if action.text() == "打开网页版 DeepSeek").trigger()
     assert opened_urls == [modern_menu_mod.DEEPSEEK_WEB_URL]
     assert all("旧版菜单" not in action.text() for action in menu.actions())
     menu.close()
@@ -960,7 +976,8 @@ def test_modern_menu_starts_with_ojingjing_entry_and_uses_pet_avatar(monkeypatch
     assert entry.height() == 39
     assert entry.findChild(QWidget, "ojingjingAvatar") is not None
     assert entry.findChild(QWidget, "ojingjingClickAccessory") is not None
-    spawn = next(action for action in menu.actions() if action.text() == "生小肥鱼")
+    whale = next(action.menu() for action in menu.actions() if action.text() == "鲸鱼娘")
+    spawn = next(action for action in whale.actions() if action.text() == "生小肥鱼")
     pixmap = spawn.icon().pixmap(18, 18)
     center = pixmap.toImage().pixelColor(pixmap.width() // 2, pixmap.height() // 2)
     assert center.blue() > center.red() + 80
@@ -1129,17 +1146,26 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert isinstance(dialog.sidebar, QListWidget)
     assert isinstance(dialog.pages, QStackedWidget)
     assert [dialog.sidebar.item(i).text() for i in range(dialog.sidebar.count())] == [
+        "鲸鱼娘",
         "常规",
         "桌宠行为",
-        "情境感知",
         "外观",
-        "快捷启动",
+        "陪伴",
+        "情境感知",
         "AI 设置",
+        "连接",
+        "Agent 联动",
+        "工具与实验",
+        "快捷启动",
     ]
-    assert dialog.pages.count() == 6
+    assert dialog.pages.count() == 7
     assert dialog.search_edit.placeholderText() == "搜索设置…"
-    assert all(not dialog.sidebar.item(i).icon().isNull() for i in range(dialog.sidebar.count()))
-    assert all(dialog.sidebar.item(i).sizeHint().height() >= 34 for i in range(dialog.sidebar.count()))
+    page_items = [
+        dialog.sidebar.item(i) for i in range(dialog.sidebar.count())
+        if isinstance(dialog.sidebar.item(i).data(Qt.ItemDataRole.UserRole), int)
+    ]
+    assert all(not item.icon().isNull() for item in page_items)
+    assert all(item.sizeHint().height() >= 34 for item in page_items)
     assert "QListWidget#settingsSidebar::item:hover" in dialog.styleSheet()
     assert "border-right: 1px solid #e3e5e8" in dialog.styleSheet()
     assert "background: #f7f7f8" in dialog.styleSheet()
@@ -1190,10 +1216,10 @@ def test_modern_settings_panel_uses_sidebar_and_includes_ai_settings(tmp_path, m
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_autostart")) == 0
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_playback_speed")) == 1
     assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_self_talk_texts")) == 1
-    # 情境感知页插入「桌宠行为」之后 → 外观/AI 设置索引后移
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_scale")) == 3
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_chat_ui_style")) == 3
-    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")) == 5
+    # 情境感知页 + Agent 联动页插入「桌宠行为」之后 → 外观/AI 设置索引后移
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_scale")) == 4
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_chat_ui_style")) == 4
+    assert page_index(dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")) == 6
     if settings_mod.sys.platform != "win32":
         assert dialog.auto_hide_fullscreen_check is None
         assert dialog.stream_capture_check is None
@@ -1426,7 +1452,8 @@ def test_modern_menu_adds_quick_launch_submenu_and_uses_saved_appearance(monkeyp
     app = QApplication.instance() or QApplication([])
     menu = QMenu()
     populate_context_menu(menu, Pet())
-    shortcut = next(action for action in menu.actions() if action.text() == "快捷启动")
+    tools = next(action.menu() for action in menu.actions() if action.text() == "工具与实验")
+    shortcut = next(action for action in tools.actions() if action.text() == "快捷启动")
     assert shortcut.menu() is not None
     assert [action.text() for action in shortcut.menu().actions()] == ["默认浏览器", "Finder"]
     assert all(not action.icon().isNull() for action in shortcut.menu().actions())
@@ -1455,7 +1482,7 @@ def test_modern_settings_search_locates_rows_and_return_does_not_close(tmp_path,
     dialog.search_edit.setFocus()
     dialog.search_edit.setText("API 地址")
     app.processEvents()
-    assert dialog.sidebar.currentRow() == 5  # AI 设置页在「情境感知」之后，索引后移
+    assert dialog.sidebar.currentRow() == 6  # AI 设置页在「情境感知/Agent 联动」之后，索引后移
     api_row = dialog.findChild(settings_mod.SettingRow, "settingRow_api_url")
     assert api_row.property("searchMatch") is True
     QTest.keyClick(dialog.search_edit, Qt.Key.Key_Return)
@@ -1502,7 +1529,9 @@ def test_legacy_config_value_dispatches_legacy_layout(monkeypatch):
     labels = [action.text() for action in menu.actions() if not action.isSeparator()]
     # legacy 布局：无图标、无现代专属入口（看看屏幕/更新与帮助/生小肥鱼层级不同）
     assert labels.index("生小肥鱼") == labels.index("开机自启") + 1
-    assert labels.index("打开网页版 DeepSeek") == labels.index("启动 DeepSeek Harness") + 1
+    # Token 花费统计/设置 插入在 Harness 与 网页版 之间，只断言相对顺序而非相邻
+    assert labels.index("打开网页版 DeepSeek") > labels.index("启动 DeepSeek Harness")
+    assert labels.index("Token 花费统计") == labels.index("启动 DeepSeek Harness") + 1
     assert menu.styleSheet() == ""
     icon_actions = [action.text() for action in menu.actions() if not action.icon().isNull()]
     assert icon_actions == []
@@ -1633,7 +1662,8 @@ def test_modern_animation_leaf_icons_are_loaded_only_when_category_opens(monkeyp
     populate_context_menu(menu, pet)
     # Opening the root menu must not synchronously decode every animation.
     assert pet.icon_requests == 0
-    animations = next(submenu for submenu in menu._owned_submenus if submenu.title() == "播放动画")
+    whale = next(submenu for submenu in menu._owned_submenus if submenu.title() == "鲸鱼娘")
+    animations = next(submenu for submenu in whale._owned_submenus if submenu.title() == "播放动画")
     idle = next(submenu for submenu in animations._owned_submenus if submenu.title() == "待机")
     placeholder_key = idle.actions()[0].icon().cacheKey()
     assert not idle.actions()[0].icon().isNull()

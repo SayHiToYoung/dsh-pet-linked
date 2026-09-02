@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 from . import catalog
 
@@ -244,6 +246,123 @@ def _clean_self_talk_texts(value):
     return texts or list(DEFAULT_SELF_TALK_TEXTS)
 
 
+def _default_proactive_screen_data() -> dict:
+    """主动识屏配置默认值（上游 proactive.py 移植）。"""
+    return {
+        "enabled": False,
+        "dry_run": False,
+        "preset": "balanced",
+        "allow_when_mouse_through": True,
+        "whitelist": [],
+        "dwell_seconds": 45,
+        "require_idle": False,
+        "min_idle_seconds": 30,
+        "cooldown_minutes": 5,
+        "daily_cap": 15,
+        "min_request_interval_seconds": 60,
+        "change_threshold": 8,
+        "prefer_free_provider": True,
+        "pre_cue": True,
+    }
+
+
+def _merge_proactive_screen_data(raw: Any) -> dict:
+    result = _default_proactive_screen_data()
+    if isinstance(raw, dict):
+        result.update(raw)
+    return result
+
+
+def _default_agent_link_data() -> dict:
+    """多 Agent 联动配置默认值（上游 agent_link.py 移植）。"""
+    return {
+        "dsh": False,
+        "claude": False,
+        "cursor": False,
+        "opencode": False,
+        # 自定义联动 Agent（协议见 docs/AGENT_LINK_PROTOCOL.md §4）：只读监听
+        # 用户指定的事件文件，不写外部配置、无需授权弹窗，默认空
+        "custom_agents": [],
+        # 联动气泡：开始干活提醒（可选，默认关）、任务完成通知（默认开）
+        "notify_state": False,
+        "notify_done": True,
+        # 过程汇报（可选，默认关）：Agent 干活中报「正在读文件/跑命令/改代码…」
+        "notify_activity": False,
+        # 音效配置
+        "sound_enabled": False,
+        "sound_start_path": "builtin:agent-start",
+        "sound_done_path": "builtin:agent-done",
+        "sound_error_path": "builtin:agent-error",
+        "sound_volume": 0.65,
+        "sound_cooldown_seconds": 2.0,
+        "sound_start_enabled": True,
+        "sound_done_enabled": True,
+        "sound_error_enabled": True,
+    }
+
+
+# 内置联动 Agent 键：custom_agents 的 key 不得与之重复
+_AGENT_LINK_BUILTIN_KEYS = ("dsh", "claude", "cursor", "opencode")
+# 自定义联动 Agent 条目上限（防配置文件被塞爆）
+_CUSTOM_AGENT_MAX = 8
+
+
+def _clean_custom_agents(raw: Any) -> list[dict]:
+    """清洗自定义联动 Agent 列表（agent_link.custom_agents）。
+
+    条目 {key, name, path}：key 为小写标识（不得与内置键/其他条目重复），
+    name 为显示名（缺省用 key），path 为事件文件路径（支持 ~，允许暂不存在）。
+    非法条目直接丢弃，超出上限截断。"""
+    if not isinstance(raw, list):
+        return []
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in raw:
+        if len(result) >= _CUSTOM_AGENT_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", key):
+            continue
+        if key in _AGENT_LINK_BUILTIN_KEYS or key in seen:
+            continue
+        path = str(item.get("path") or "").strip()[:500]
+        if not path:
+            continue
+        name = str(item.get("name") or "").strip()[:50] or key
+        seen.add(key)
+        result.append({"key": key, "name": name, "path": path})
+    return result
+
+
+def _clean_agent_link_data(raw: Any) -> dict:
+    defaults = _default_agent_link_data()
+    if not isinstance(raw, dict):
+        return dict(defaults)
+    result = dict(defaults)
+    # 保留传入的额外合法键（例如 thinking_text, thinking_texts 等）
+    result.update(raw)
+    result["custom_agents"] = _clean_custom_agents(raw.get("custom_agents"))
+    for key in (
+        "dsh", "claude", "cursor", "opencode", "notify_state", "notify_done", "notify_activity",
+        "sound_enabled", "sound_start_enabled", "sound_done_enabled", "sound_error_enabled",
+    ):
+        if key in raw:
+            result[key] = bool(raw[key])
+    for key in ("sound_start_path", "sound_done_path", "sound_error_path"):
+        if key in raw:
+            val = str(raw[key] or "").strip()[:500]
+            result[key] = val or defaults[key]
+    if "sound_volume" in raw:
+        result["sound_volume"] = _float_or_default(raw.get("sound_volume"), defaults["sound_volume"], 0.0, 1.0)
+    if "sound_cooldown_seconds" in raw:
+        result["sound_cooldown_seconds"] = _float_or_default(
+            raw.get("sound_cooldown_seconds"), defaults["sound_cooldown_seconds"], 0.0, 30.0
+        )
+    return result
+
+
 class Config:
     def __init__(self, base=None):
         base = Path(base) if isinstance(base, str) else (base or _default_base())
@@ -304,6 +423,8 @@ class Config:
             "context_rules": {},              # 用户覆盖规则：{meeting/gaming/work: [关键词...]}；空=内置默认
             "meeting_care_enabled": True,     # 会议关怀总开关（按开会时长分档反馈）
             "meeting_care_thresholds": [],    # 会议关怀档位（分钟）：[30,60,120]；空=内置默认
+            "proactive_screen": _default_proactive_screen_data(),  # 主动识屏（上游移植）
+            "agent_link": _default_agent_link_data(),             # 多 Agent 联动（上游移植）
         }
         self._load()
         self._normalize_pet_settings()
@@ -383,6 +504,11 @@ class Config:
         ):
             if key in raw and raw[key] is not None:
                 self.data[key] = raw[key]
+        # 嵌套配置组：走清洗合并，防脏数据（上游 proactive/agent_link 移植）
+        if "proactive_screen" in raw:
+            self.data["proactive_screen"] = _merge_proactive_screen_data(raw["proactive_screen"])
+        if "agent_link" in raw:
+            self.data["agent_link"] = _clean_agent_link_data(raw["agent_link"])
         self.data["version"] = 4
 
     def _normalize_pet_settings(self):

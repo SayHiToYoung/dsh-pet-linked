@@ -389,3 +389,53 @@ def add_template_switch(menu: QMenu, pet, label: str, target: str, *, icons: boo
 
 def add_quit(menu: QMenu, pet, *, icons: bool = True):
     return add_action(menu, "退出", "exit" if icons else None, pet._request_quit, close_on_trigger=True)
+
+
+def add_agent_link_menu(menu: QMenu, pet, *, icons: bool = True):
+    """Agent 联动二级菜单（4 个 Agent 独立开关 + 自定义 Agent + 气泡提醒选项，失败/拒绝自动回滚勾选）。"""
+    sub = add_submenu(menu, "Agent 联动", "link" if icons else None)
+    agent_cfg = dict(pet.cfg.get('agent_link', {}))
+    for agent_key, agent_label in (
+        ('dsh', 'DeepSeek Harness (DSH)'),
+        ('claude', 'Claude Code'),
+        ('cursor', 'Cursor'),
+        ('opencode', 'OpenCode'),
+    ):
+        act = sub.addAction(agent_label)
+        act.setCheckable(True)
+        act.setChecked(bool(agent_cfg.get(agent_key, False)))
+        act.toggled.connect(lambda on, k=agent_key, a=act: pet._toggle_agent_link(k, on, a))
+    # 自定义联动 Agent（config.json 的 agent_link.custom_agents，只读监听）
+    for item in (agent_cfg.get('custom_agents') or []):
+        key = str(item.get('key') or '')
+        if not key:
+            continue
+        act = sub.addAction(str(item.get('name') or key))
+        act.setCheckable(True)
+        act.setChecked(bool(agent_cfg.get(key, False)))
+        act.toggled.connect(lambda on, k=key, a=act: pet._toggle_agent_link(k, on, a))
+    sub.addSeparator()
+    for opt_key, opt_label in (
+        ('notify_state', '开始干活气泡提醒'),
+        ('notify_done', '任务完成气泡提醒'),
+        ('notify_activity', '过程汇报气泡（正在读文件/跑命令…）'),
+    ):
+        act = sub.addAction(opt_label)
+        act.setCheckable(True)
+        act.setChecked(bool(agent_cfg.get(opt_key, opt_key == 'notify_done')))
+        act.toggled.connect(lambda on, k=opt_key: pet._set_agent_link_option(k, on))
+    return sub
+
+
+def add_proactive_menu(menu: QMenu, pet, *, icons: bool = True):
+    """「主动识屏」子菜单（仅 Windows + 有聊天能力时挂载；上游 proactive.py 移植）。"""
+    pro_cfg = pet.cfg.get("proactive_screen", {}) if pet.cfg is not None else {}
+    submenu = add_submenu(menu, "主动识屏", "camera" if icons else None)
+    action = submenu.addAction("开启主动识屏")
+    action.setCheckable(True)
+    action.setChecked(bool((pro_cfg or {}).get("enabled", False)))
+    action.toggled.connect(lambda enabled: pet._toggle_proactive_enabled(enabled))
+    settings_cb = getattr(pet, "on_open_modern_settings", None)
+    if settings_cb is not None:
+        add_action(submenu, "打开设置…", "settings" if icons else None, settings_cb, close_on_trigger=True)
+    return submenu

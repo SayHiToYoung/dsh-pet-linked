@@ -19,6 +19,15 @@
 5. 🕰️ **会议关怀** —— 记录开会时长，散会后按开了多久分档体贴一句「辛苦啦」
    （默认 30 / 60 / 120 分钟三档，可调）；同一次会议只结算一次、有冷却防刷屏。
    设置界面「情境感知 → 会议关怀」可开关与调档。
+6. 👀 **主动识屏（Windows）** —— 白名单驱动的偶尔关怀：前台命中白名单（进程名或
+   `title:` 标题关键词）并停留达标后，截屏发给视觉模型，用人设口吻回应一句。
+   截图只在内存处理、不落盘；配套 dHash 画面变化检测、跨实例频控（每日上限/冷却/熔断）、
+   dry-run 验证模式与短期陪伴记忆。仅 Windows + 有聊天能力时挂载，设置界面
+   「主动识屏」页可开关、选节奏预设、维护白名单。
+7. 🔗 **Agent 联动** —— 感知 DSH / Claude Code / Cursor / OpenCode（及自定义 Agent）
+   的干活状态：开始时切联动动画、过程汇报、完成后气泡提醒；可插音效。
+   DSH/Claude 首次开启经弹窗授权注入桥接插件/事件 hooks，关闭自动卸载；Cursor/OpenCode
+   只读本地事件源无需安装。设置界面「Agent 联动」页 + 右键菜单开关。
 
 > 数据全部走本机回环（127.0.0.1），无遥测、无外部请求。DSH 侧只注入一个只读信标脚本，
 > 不修改 DSH 业务逻辑，可随时回滚。
@@ -40,6 +49,8 @@
   `handoff_enter / handoff_leave / _handoff_glide` 沿屏幕坐标滑行进出，形象与办公区同款（shenshen）
 - **归属状态机**：`desktop_list()` / `set_on_desktop()` / `office_root_id()` 维护
   「谁在桌面」，办公区轮询 `/office/desktop` 对齐，避免同一只鲸两处同画
+- **同一个她状态核心**：`pet/companion_state.py` 统一维护 `shenshen` 的唯一视觉归属、
+  `instanceId / revision / handoffId`；Office 8 秒租约失效或交接超时后自动回桌面
 - **信号优先级**：office 状态（7 秒心跳）压制旧 DOM 信标；心跳失效后信标自动接管，
   避免两套工作态打架
 - 单测：`tests/test_office_handoff.py`
@@ -84,6 +95,28 @@
   调整各阈值（分钟），保存立即生效、无需重启；底层存 `proactive_care_enabled` /
   `proactive_care_thresholds`（秒），见 `pet/proactive_care.py`
 
+### 主动识屏（Windows，移植自上游）
+- 白名单驱动的偶尔关怀：前台命中白名单（进程名或 `title:` 标题关键词）并停留达标后，
+  截屏发给视觉模型，用人设口吻回应一句——截图**只在内存处理、不落盘**
+- 配套 dHash 画面变化检测（防对同一静止画面重复触发）、跨实例频控门禁
+  （每日上限 / 冷却 / 熔断，多开共用一份状态）、dry-run 验证模式与短期陪伴记忆
+  （只存进程名 + 活动分类，不落标题）
+- **仅 Windows + 有聊天能力时挂载**；设置界面 →「主动识屏」可开关、选节奏预设
+  （安静/平衡/活跃）、维护白名单与触发条件；右键菜单有总开关
+- 底层见 `pet/proactive.py`，完整说明见
+  [docs/主动识屏与Agent联动-移植说明-2026-09-01.md](./docs/主动识屏与Agent联动-移植说明-2026-09-01.md)
+
+### Agent 联动（感知 DSH / Claude Code / Cursor / OpenCode，移植自上游）
+- 感知各 Agent 干活状态：开始时切联动动画（写代码/吃Token 交替）、过程汇报
+  （正在读文件/跑命令/改代码…）、完成后气泡提醒「去看看成果吧」；可插音效
+- DSH / Claude 首次开启经弹窗授权注入桥接插件 / 事件 hooks，关闭自动卸载；
+  Cursor / OpenCode 只读本地事件源（agent-transcripts / SQLite）**无需安装**；
+  支持自定义 Agent（只读监听指定 JSONL 事件文件，零授权）
+- 设置界面 →「Agent 联动」可开关四个内置 Agent、气泡通知与音效；右键菜单
+  「Agent 联动」子菜单同样可勾选
+- 底层见 `pet/agent_link.py`，完整说明见
+  [docs/主动识屏与Agent联动-移植说明-2026-09-01.md](./docs/主动识屏与Agent联动-移植说明-2026-09-01.md)
+
 ### 易用性
 - `scripts/make-app.sh` 一键生成「联动桌宠.app」访达/Dock 启动器（带鲸鱼图标）
 - `启动联动桌宠.command` / `停止联动桌宠.command` 双击启停
@@ -126,6 +159,7 @@ node scripts/inject-beacon.mjs --target "<DSH_INSTALL_DIR>"
 ## 📄 文档
 
 - [DSH联动说明.md](./DSH联动说明.md) —— 本次二次开发的完整架构与说明
+- [docs/主动识屏与Agent联动-移植说明-2026-09-01.md](./docs/主动识屏与Agent联动-移植说明-2026-09-01.md) —— 主动识屏 + Agent 联动移植说明（新增文件/改动清单/配置模型/平台与授权）
 - [docs/情境感知-无处不在-2026-09-01.md](./docs/情境感知-无处不在-2026-09-01.md) —— 下一阶段方向与开发计划（情境感知）
 - [docs/UPSTREAM-README.md](./docs/UPSTREAM-README.md) —— 上游作者原始 README（存档）
 - docs/ —— 上游开发过程中的其他记录

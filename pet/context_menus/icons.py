@@ -204,6 +204,15 @@ def vector_menu_icon(menu: QMenu, name: str, size: int | None = None) -> QIcon:
     elif name in {"tools", "functions"}:
         painter.drawRoundedRect(QRectF(1.5, 2.0, 13.0, 12.0), 2.0, 2.0)
         painter.drawLine(QPointF(5.0, 5.0), QPointF(11.0, 11.0)); painter.drawEllipse(QPointF(4.5, 4.5), 1.5, 1.5); painter.drawEllipse(QPointF(11.5, 11.5), 1.5, 1.5)
+    elif name == "link":
+        # 两个圆环套接，示意「联动」
+        painter.drawEllipse(QPointF(5.2, 8.0), 3.2, 3.2)
+        painter.drawEllipse(QPointF(10.8, 8.0), 3.2, 3.2)
+        painter.drawLine(QPointF(6.0, 5.8), QPointF(10.0, 5.8)); painter.drawLine(QPointF(6.0, 10.2), QPointF(10.0, 10.2))
+    elif name == "camera":
+        painter.drawRoundedRect(QRectF(1.8, 3.5, 12.4, 9.0), 1.8, 1.8)
+        painter.drawEllipse(QPointF(8.0, 8.0), 2.6, 2.6)
+        painter.drawLine(QPointF(5.2, 3.8), QPointF(6.4, 1.9)); painter.drawLine(QPointF(6.4, 1.9), QPointF(9.6, 1.9)); painter.drawLine(QPointF(9.6, 1.9), QPointF(10.8, 3.8))
     elif name == "exit":
         painter.drawLine(QPointF(3.0, 3.0), QPointF(13.0, 13.0)); painter.drawLine(QPointF(13.0, 3.0), QPointF(3.0, 13.0))
     else:

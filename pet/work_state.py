@@ -16,10 +16,14 @@ import json
 import logging
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
+from .companion_state import CompanionState, DESKTOP_SURFACE, connector_surface
+
 DEFAULT_PORT = int(__import__("os").environ.get("DSH_PET_STATE_PORT", "47890"))
+OFFICE_CONNECTOR_ID = "dsh-agent-office"
 
 
 class WorkStateServer:
@@ -30,6 +34,8 @@ class WorkStateServer:
                  on_emote: Callable[[str], None] | None = None,
                  on_root: Callable[[dict], None] | None = None,
                  on_handoff: Callable[[dict], None] | None = None,
+                 on_companion_recovered: Callable[[dict], None] | None = None,
+                 companion: CompanionState | None = None,
                  port: int = DEFAULT_PORT):
         self._port = port
         self._on_change = on_change
@@ -40,11 +46,11 @@ class WorkStateServer:
         #   on_handoff —— 办公区触发「搬家」(主控鲸走出办公室来到桌面 / 回去)
         self._on_root = on_root
         self._on_handoff = on_handoff
+        self._on_companion_recovered = on_companion_recovered
         self._lock = threading.Lock()
-        # 已「在桌面」的智能体 id(搬家归属:同一时刻只该有一处渲染它)
-        self._desktop: set[str] = set()
-        # 独立桌宠启动时天然位于桌面；首次拿到 rootId 后会绑定为该主控鲸。
-        self._pet_at_desktop: bool = True
+        # “同一个她”的唯一视觉归属。WorkStateServer 只做 Office 兼容适配，
+        # 桌面/连接器归属、交接幂等和失联回退全部由 CompanionState 裁决。
+        self._companion = companion or CompanionState()
         # 办公区面板在屏幕上的矩形 + 主控鲸 id(桌宠拖回办公区时判定用)
         self._office_rect: dict = {}
         self._office_root_id: str = ""
@@ -133,17 +139,21 @@ class WorkStateServer:
                 if path == "/office/root":
                     # 办公区推来的「主控鲸」实时状态(+ 审批数)→ 桌宠镜像
                     server.notify_root(payload)
-                    self._send_json(200, {"ok": True})
+                    self._send_json(200, {"ok": True, **server.companion_snapshot()})
                     return
                 if path == "/office/handoff":
                     # 搬家:{dir:"to_desktop"|"to_office", agentId, fromScreen:{x,y}, label, model}
                     info = server.handle_handoff(payload)
-                    self._send_json(200, {"ok": True, "desktop": info})
+                    self._send_json(200, {
+                        "ok": True,
+                        "desktop": info,
+                        "agents": info,
+                        **server.companion_snapshot(),
+                    })
                     return
                 if path == "/office/sync":
                     # 办公区每轮同步:上报面板屏幕矩形 + 主控鲸 id;回「谁在桌面」+ 一次性落点
-                    server.set_office_rect(payload.get("panelRect"), str(payload.get("rootId") or ""))
-                    resp = {"agents": server.desktop_list()}
+                    resp = server.sync_office(payload)
                     drop = server.consume_drop_screen()
                     if drop:
                         resp["drop"] = drop
@@ -158,12 +168,21 @@ class WorkStateServer:
                 elif path == "/usage":
                     self._send_json(200, server.usage_snapshot())
                 elif path == "/office/desktop":
-                    self._send_json(200, {"agents": server.desktop_list()})
+                    self._send_json(200, {
+                        "agents": server.desktop_list(),
+                        **server.companion_snapshot(),
+                    })
+                elif path == "/companion/state":
+                    self._send_json(200, server.companion_snapshot())
                 elif path == "/office/dragstate":
                     # 办公区 ghost 无感进入:桌宠拖动实时位置 + 是否压在面板上
                     self._send_json(200, server.drag_state())
                 elif path in ("/health", ""):
-                    self._send_json(200, {"ok": True, "port": server.port})
+                    self._send_json(200, {
+                        "ok": True,
+                        "port": server.port,
+                        **server.companion_snapshot(),
+                    })
                 else:
                     self._send_json(404, {"ok": False, "error": "not found"})
 
@@ -180,15 +199,18 @@ class WorkStateServer:
                     k: int(v) if isinstance(v, (int, float)) else v
                     for k, v in diag.items()
                 }
-            same = working == self.working and detail == self.detail
             office_active = time.monotonic() - self._office_last_seen < 7.0
-            if same and (office_active or not self._beacon_callback_suppressed):
-                return False
+            state_changed = working != self.working
+            needs_takeover = self._beacon_callback_suppressed and not office_active
             self.working = working
             self.detail = detail
             if office_active:
                 self._beacon_callback_suppressed = True
                 cb = None
+            elif not state_changed and not needs_takeover:
+                # 同一轮里 DSH 可能反复更新 thinking/tool detail；它们只是进度，
+                # 不是新的“开工”。仍保存最新 detail，但不重播桌宠入场动画。
+                return False
             else:
                 self._beacon_callback_suppressed = False
                 cb = self._on_change
@@ -238,12 +260,35 @@ class WorkStateServer:
                 logging.exception("work_state emote 回调失败")
 
     # ---- 办公区联动(dsh-agent-office → 桌宠)----
+    @staticmethod
+    def _connector_meta(payload: dict | None) -> tuple[str, str]:
+        data = payload if isinstance(payload, dict) else {}
+        connector_id = str(data.get("connectorId") or OFFICE_CONNECTOR_ID).strip()[:80]
+        lease_id = str(data.get("leaseId") or "legacy-office").strip()[:120]
+        return connector_id or OFFICE_CONNECTOR_ID, lease_id or "legacy-office"
+
+    def companion_snapshot(self) -> dict:
+        return self._companion.snapshot()
+
+    def sync_office(self, payload: dict | None) -> dict:
+        """Office 心跳 + 面板信息同步，返回统一视觉归属快照。"""
+        data = dict(payload) if isinstance(payload, dict) else {}
+        connector_id, lease_id = self._connector_meta(data)
+        self._companion.heartbeat(connector_id, lease_id)
+        self.set_office_rect(data.get("panelRect"), str(data.get("rootId") or ""))
+        return {
+            "agents": self.desktop_list(),
+            **self._companion.snapshot(),
+        }
+
     def notify_root(self, payload: dict) -> None:
         """办公区推来的「主控鲸」实时状态 → 触发镜像回调(主线程里应用)。"""
         cb = self._on_root
         if cb is None:
             return
         try:
+            connector_id, lease_id = self._connector_meta(payload)
+            self._companion.heartbeat(connector_id, lease_id)
             with self._lock:
                 self._office_last_seen = time.monotonic()
             cb(dict(payload) if isinstance(payload, dict) else {})
@@ -260,16 +305,26 @@ class WorkStateServer:
         p = dict(payload) if isinstance(payload, dict) else {}
         agent_id = str(p.get("agentId") or p.get("id") or "root")
         direction = str(p.get("dir") or "to_desktop")
-        with self._lock:
-            if direction == "to_desktop":
-                # 主控鲸从办公区搬到桌面:归属移交桌宠(到桌面才真正由桌宠接管)
-                self._desktop.clear()
-                self._pet_at_desktop = True
-                self._desktop.add(agent_id)
-            # to_office:先不动归属集,等桌宠到位回调再清空
-            snap = sorted(self._desktop)
+        connector_id, lease_id = self._connector_meta(p)
+        self._companion.heartbeat(connector_id, lease_id)
+        handoff_id = str(p.get("handoffId") or uuid.uuid4().hex)[:160]
+        p["handoffId"] = handoff_id
+        p["connectorId"] = connector_id
+
+        target = DESKTOP_SURFACE if direction == "to_desktop" else connector_surface(connector_id)
+        _state, accepted = self._companion.request_handoff(
+            handoff_id,
+            target,
+            connector_id=connector_id,
+        )
+        if accepted and direction == "to_desktop":
+            # Office 已经走到大门才发请求，可以立即把唯一渲染权交给桌面。
+            self._companion.commit_handoff(handoff_id)
+        p["accepted"] = accepted
+        snap = self.desktop_list()
         cb = self._on_handoff
-        if cb is not None:
+        # 重复 handoffId 不重播动画，保证网络重试幂等。
+        if accepted and cb is not None:
             try:
                 cb(p)
             except Exception:
@@ -278,19 +333,15 @@ class WorkStateServer:
 
     def desktop_list(self) -> list[str]:
         with self._lock:
-            return sorted(self._desktop)
+            root_id = self._office_root_id
+        return [root_id] if root_id and self._companion.is_desktop() else []
 
     def set_office_rect(self, rect, root_id: str = "") -> None:
         with self._lock:
             if isinstance(rect, dict):
                 self._office_rect = {k: rect.get(k) for k in ("left", "top", "right", "bottom")}
             if root_id and root_id != self._office_root_id:
-                old_root = self._office_root_id
-                if old_root:
-                    self._desktop.discard(old_root)
                 self._office_root_id = root_id
-                if self._pet_at_desktop:
-                    self._desktop.add(root_id)
             elif root_id:
                 self._office_root_id = root_id
 
@@ -302,14 +353,48 @@ class WorkStateServer:
         with self._lock:
             return self._office_root_id
 
-    def set_on_desktop(self, agent_id: str, on: bool) -> list[str]:
+    def begin_to_office(self, agent_id: str, handoff_id: str = "") -> str:
+        """桌宠拖入 Office 时主动创建一笔交接，返回可用于到位提交的 id。"""
+        clean_id = str(handoff_id or uuid.uuid4().hex)[:160]
+        self._companion.heartbeat(OFFICE_CONNECTOR_ID, "legacy-office")
+        _snap, accepted = self._companion.request_handoff(
+            clean_id,
+            connector_surface(OFFICE_CONNECTOR_ID),
+            connector_id=OFFICE_CONNECTOR_ID,
+        )
+        return clean_id if accepted else ""
+
+    def set_on_desktop(self, agent_id: str, on: bool, handoff_id: str = "") -> list[str]:
         """桌宠端改「谁在桌面」(拖回办公区 → on=False);返回当前集合。"""
-        with self._lock:
-            self._desktop.clear()
-            self._pet_at_desktop = bool(on)
-            if on:
-                self._desktop.add(agent_id)
-            return sorted(self._desktop)
+        if on:
+            self._companion.force_surface(DESKTOP_SURFACE, reason="desktop_claimed")
+        elif handoff_id:
+            self._companion.commit_handoff(handoff_id)
+        else:
+            # 兼容旧调用与既有单测；没有交接 id 时直接归属当前 Office。
+            self._companion.force_surface(
+                connector_surface(OFFICE_CONNECTOR_ID),
+                connector_id=OFFICE_CONNECTOR_ID,
+                reason="legacy_office_claimed",
+            )
+        return self.desktop_list()
+
+    def expire_companion(self) -> dict | None:
+        """由主线程定时调用；Office 失联或交接卡住时把鲸鱼娘收回桌面。"""
+        event = self._companion.expire()
+        if not event:
+            return None
+        if event.get("recoveredToDesktop"):
+            with self._lock:
+                # 面板已经不可信，避免桌宠被拖进一个不存在的 Office 矩形。
+                self._office_rect = {}
+            cb = self._on_companion_recovered
+            if cb is not None:
+                try:
+                    cb(dict(event))
+                except Exception:
+                    logging.exception("companion recovery 回调失败")
+        return event
 
     def set_drag_state(self, active: bool, x: float = 0.0, y: float = 0.0, over: bool = False) -> None:
         """桌宠拖动中上报:实时屏幕坐标 + 是否压在办公区面板上(over)。"""

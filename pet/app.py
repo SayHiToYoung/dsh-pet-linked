@@ -91,6 +91,7 @@ class _WorkStateBridge(QObject):
     care_line = Signal(str)  # 主动关怀台词 → 主线程气泡
     office_root = Signal(object)  # 办公区推来的「主控鲸」状态 → 桌宠镜像
     handoff = Signal(object)      # 办公区触发「搬家」→ 走入/走回动画
+    companion_recovered = Signal(object)  # Office 失联/交接超时 → 桌面安全恢复
     context = Signal(str, object) # 情境感知：前台应用 → 桌宠行为（会议躲起/游戏安静）
 
     def __init__(self, controller) -> None:
@@ -102,6 +103,7 @@ class _WorkStateBridge(QObject):
         self.care_line.connect(self._apply_care_line)
         self.office_root.connect(self._apply_office_root)
         self.handoff.connect(self._apply_handoff)
+        self.companion_recovered.connect(self._apply_companion_recovered)
         self.context.connect(self._apply_context)
 
     def _apply(self, working: bool, detail: str) -> None:
@@ -163,20 +165,48 @@ class _WorkStateBridge(QObject):
             sy = fs.get("y")
             if direction == "to_office":
                 agent_id = str(info.get("agentId") or info.get("id") or "root")
+                handoff_id = str(info.get("handoffId") or "")
 
                 def _arrived() -> None:
                     srv = getattr(self.controller, "_work_server", None)
                     if srv is not None:
-                        srv.set_on_desktop(agent_id, False)
+                        owners = srv.set_on_desktop(agent_id, False, handoff_id=handoff_id)
+                        if agent_id in owners:
+                            # 动画期间连接器失联/交接超时：提交被拒绝，桌面立即重新显示。
+                            self.controller._on_companion_recovered({
+                                "reason": "handoff_commit_rejected",
+                                "recoveredToDesktop": True,
+                                "state": srv.companion_snapshot(),
+                            })
 
                 win.handoff_leave(sx, sy, on_done=_arrived)
             else:
+                if getattr(win, "_context_hidden", False):
+                    # 会议/手动勿扰优先于视觉归属；状态回桌面，但继续保持安静隐藏。
+                    return
                 # handoff_enter 内部会：先定位到大门→透明度0→show→淡入滑入，无需提前 show
                 win.handoff_enter(float(sx if sx is not None else 0.0),
                                   float(sy if sy is not None else 0.0),
                                   label=str(info.get("label") or ""))
         except Exception:
             logging.exception("搬家动画应用失败")
+
+    def _apply_companion_recovered(self, event) -> None:
+        """Office 失联或交接失败时，让唯一的鲸鱼娘安全回到桌面。"""
+        win = self.controller.win
+        if win is None or not isinstance(event, dict):
+            return
+        if getattr(win, "_context_hidden", False):
+            return
+        try:
+            win.setWindowOpacity(1.0)
+            win.show()
+            win.raise_()
+            reason = str(event.get("reason") or "")
+            if reason == "connector_lease_expired":
+                win.show_bubble("办公室断开了，我先回桌面陪你～", duration_ms=3200)
+        except Exception:
+            logging.exception("鲸鱼娘恢复桌面显示失败")
 
     def _apply_context(self, context: str, app) -> None:
         """情境变化 → 桌宠行为（主线程）。"""
@@ -245,6 +275,7 @@ class PetApp:
         self._update_bridge = None
         self._work_bridge = _WorkStateBridge(self)
         self._work_server: WorkStateServer | None = None
+        self._companion_timer: QTimer | None = None
         self._ledger_timer: QTimer | None = None
         self._ledger_busy = False
         # 情境感知（前台应用监听 → context 事件）
@@ -292,9 +323,15 @@ class PetApp:
             # 办公区(dsh-agent-office)联动：主控鲸状态镜像 + 搬家
             on_root=self._on_office_root,
             on_handoff=self._on_handoff,
+            on_companion_recovered=self._on_companion_recovered,
         )
         if server.start():
             self._work_server = server
+            timer = QTimer()
+            timer.setInterval(1000)
+            timer.timeout.connect(self._poll_companion_state)
+            timer.start()
+            self._companion_timer = timer
             if self.win is not None:
                 # 桌宠被拖动松手 → 判断是否拖进了办公区面板(搬回)
                 self.win.on_dropped = self._on_pet_dropped
@@ -319,6 +356,14 @@ class PetApp:
     def _on_handoff(self, info: dict) -> None:
         # 办公区触发搬家（HTTP 线程）→ 主线程播动画
         self._work_bridge.handoff.emit(info)
+
+    def _on_companion_recovered(self, event: dict) -> None:
+        self._work_bridge.companion_recovered.emit(event)
+
+    def _poll_companion_state(self) -> None:
+        server = self._work_server
+        if server is not None:
+            server.expire_companion()
 
     def _pet_over_office(self, geo):
         """返回 (rect, rid, cx, cy, over)；rect/rid 缺失时 over=False。"""
@@ -373,12 +418,21 @@ class PetApp:
         try:
             rect, rid, cx, cy, over = self._pet_over_office(geo)
             if rect and rid and over:
+                handoff_id = srv.begin_to_office(rid)
+                if not handoff_id:
+                    return
                 committed = True
                 # 记录落点（一次性下发给办公区，决定主控鲸落到哪个场景位置）
                 srv.note_drop_screen(cx, cy)
 
                 def _arrived() -> None:
-                    srv.set_on_desktop(rid, False)
+                    owners = srv.set_on_desktop(rid, False, handoff_id=handoff_id)
+                    if rid in owners:
+                        self._on_companion_recovered({
+                            "reason": "handoff_commit_rejected",
+                            "recoveredToDesktop": True,
+                            "state": srv.companion_snapshot(),
+                        })
 
                 win.handoff_leave(cx, cy, on_done=_arrived)
         except Exception:
@@ -396,6 +450,9 @@ class PetApp:
                     pass
 
     def _stop_work_state(self) -> None:
+        if self._companion_timer is not None:
+            self._companion_timer.stop()
+            self._companion_timer = None
         if self._work_server is not None:
             self._work_server.stop()
             self._work_server = None
@@ -925,6 +982,17 @@ class PetApp:
             return
         if self.win is not None:
             self.win.refresh_pet_settings()
+            # 主动识屏 / Agent 联动：设置保存后立即按新配置启停（无需重启）
+            if getattr(self.win, "proactive_watcher", None) is not None:
+                try:
+                    self.win.proactive_watcher.apply_config()
+                except Exception:
+                    logging.exception("主动识屏配置重载失败")
+            if getattr(self.win, "agent_link_manager", None) is not None:
+                try:
+                    self.win.agent_link_manager.apply_config()
+                except Exception:
+                    logging.exception("Agent 联动配置重载失败")
         self._apply_balance_timer()
         self._reload_proactive_care()
         self._reload_meeting_care()

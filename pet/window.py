@@ -52,6 +52,7 @@ from . import vision as vision_mod
 from . import physics as physics_mod
 from . import token_cost as token_cost_mod
 from . import context_aware as context_mod
+from .proactive import effective_proactive_config as proactive_effective_config
 
 
 def _resolve_self_talk_image_dir(raw: str) -> str:
@@ -248,6 +249,14 @@ class PetWindow(QWidget):
         # work_state=True 表示 DSH 正在跑工具/回合进行中，桌宠切"认真工作"动画
         self.work_state: bool = False
         self.work_detail: str = ""
+        # ---- Agent 联动动作衔接（上游 agent_link.py 移植）----
+        # 正在播一次性动作时联动动作不打断，存为待播（最新覆盖旧的），
+        # 等当前动作播完由 _on_anim_ended 自然接上；联动动作播完仍有 Agent 在忙则接下一个。
+        self._pending_link_anim: str | None = None
+        self._link_anim_current: str | None = None
+        self._link_next_provider = None  # AgentLinkManager 注入：()->str|None
+        # 气泡位占用时刻：主动识屏长答复/重要气泡占用期间，联动气泡让路或重试
+        self._bubble_busy_until: float = 0.0
         # ---- 办公区(dsh-agent-office)镜像 / 搬家 联动 ----
         self._approval_nudging: bool = False       # 正在提醒“有分身等批准”
         self._mirror_done_shown: bool = False      # 主控鲸本轮“干完啦”是否已播
@@ -348,6 +357,27 @@ class PetWindow(QWidget):
         self._restore_position()
         self._switch(self.idle)
         self._schedule_self_talk()
+
+        # ---- 主动识屏 + 多 Agent 联动（上游移植：作为 PetWindow 子成员，随窗口销毁/重建）----
+        # 延迟导入避免循环依赖；须在 _switch 之后挂载（watcher 的 G1 守卫读 isVisible）。
+        from .proactive import ProactiveScreenWatcher
+        from .agent_link import AgentLinkManager
+        self.proactive_watcher = ProactiveScreenWatcher(self, config)
+        self.agent_link_manager = AgentLinkManager(self, config)
+
+    def _pause_activity(self) -> None:
+        """窗口隐藏时暂停主动识屏/联动监视器（随窗口隐藏回收后台定时器）。"""
+        if getattr(self, "proactive_watcher", None) is not None:
+            self.proactive_watcher.pause()
+        if getattr(self, "agent_link_manager", None) is not None:
+            self.agent_link_manager.pause()
+
+    def _resume_activity(self) -> None:
+        """窗口恢复显示时重启主动识屏/联动监视器（按最新配置评估启停）。"""
+        if getattr(self, "proactive_watcher", None) is not None:
+            self.proactive_watcher.resume()
+        if getattr(self, "agent_link_manager", None) is not None:
+            self.agent_link_manager.resume()
 
     # ================================================================ 尺寸
     def _apply_scale(self) -> None:
@@ -503,6 +533,7 @@ class PetWindow(QWidget):
         super().showEvent(event)
         self._schedule_macos_window_level(bool(self.cfg.get('on_top', True)))
         self._restore_dock_icon_preference()
+        self._resume_activity()
 
     def hide(self, *, notify: bool = True) -> None:
         """隐藏桌宠。
@@ -510,6 +541,7 @@ class PetWindow(QWidget):
         macOS 同步打开 Dock 图标；notify=False 供角色切换等内部替换使用
         （不弹托盘提示、不 arm Dock 点击恢复监听）。
         """
+        self._pause_activity()
         self._ensure_dock_icon_on_hide()
         super().hide()
         if not notify:
@@ -772,6 +804,19 @@ class PetWindow(QWidget):
             self._ended_fired = False
             self.movie.start()
             return
+        # Agent 联动：待播动作优先接上（平滑衔接，不打断刚播完的动作）
+        if self._pending_link_anim:
+            self._play_pending_link_anim()
+            return
+        # 联动动作播完仍有 Agent 在忙 → 接下一个联动动作；否则走正常动画链
+        if self._link_anim_current is not None and name == self._link_anim_current:
+            self._link_anim_current = None
+            provider = self._link_next_provider
+            nxt = provider() if callable(provider) else None
+            if nxt:
+                self._link_anim_current = nxt
+                self._switch(nxt)
+                return
         if name in self.turns:
             self.facing = 'right' if self.facing == 'left' else 'left'
         if name == self.drag or name in self.clicks:
@@ -848,6 +893,43 @@ class PetWindow(QWidget):
         entries = [n for n in pool if n != exclude] or pool
         return random.choice(entries)
 
+    # ================================================================ Agent 联动动画（上游 agent_link.py 移植）
+    def _is_one_shot_playing(self) -> bool:
+        """当前是否正在播一次性动作（动作池/点击回应/移动）。待机/转向可立即切换。"""
+        return self.anim in self.acts or self.anim in self.clicks or self.anim in self.moves
+
+    def request_link_anim(self, name: str) -> None:
+        """Agent 联动动作请求：一次性动作播放中不打断，存为待播（最新覆盖旧的）。"""
+        self._pending_link_anim = name
+        if not self._is_one_shot_playing():
+            self._play_pending_link_anim()
+
+    def _play_pending_link_anim(self) -> None:
+        name = self._pending_link_anim
+        self._pending_link_anim = None
+        if not name:
+            return
+        self._link_anim_current = name
+        self._switch(name)
+
+    def request_link_idle(self) -> None:
+        """Agent 回到空闲：取消待播联动；一次性动作让它播完自然回待机，否则立即回待机。"""
+        self._pending_link_anim = None
+        self._link_anim_current = None
+        if self._is_one_shot_playing():
+            return
+        if self.idles:
+            self._switch(self._pick(self.idles))
+
+    def hold_bubble(self, seconds: float) -> None:
+        """占用气泡位 seconds 秒：让自言自语/联动气泡让路（主动识屏长答复期间用）。"""
+        try:
+            self._bubble_busy_until = max(
+                self._bubble_busy_until, time.time() + max(0.0, float(seconds))
+            )
+        except Exception:
+            pass
+
     # ================================================================ DSH 工作状态联动
     # 工作池关键词：命中即视为"认真工作"专属动画；按当前形象实际拥有的动画过滤。
     WORK_POOL_KEYWORDS = ('写代码', '吃Token', '敲击桌面', '深度思考', '轻快记录', '专心玩魔方')
@@ -857,20 +939,22 @@ class PetWindow(QWidget):
         pool = [n for n in self.acts if any(k in n for k in self.WORK_POOL_KEYWORDS)]
         return pool or self.acts
 
-    def set_work_state(self, working: bool, detail: str = "") -> None:
+    def set_work_state(self, working: bool, detail: str = "", entry_animation: str | None = None) -> None:
         """DSH 工作状态联动入口：由 app 层（信标接收端）调用。"""
         working = bool(working)
         detail = str(detail or "")
-        if working == self.work_state and detail == self.work_detail:
+        state_changed = working != self.work_state
+        self.work_detail = detail
+        if not state_changed:
+            # detail 是同一轮中的进度描述，不应被当成新的开工/收工事件。
             return
         self.work_state = working
-        self.work_detail = detail
         if self.is_quiet():
             # 开会/游戏安静态：只记状态，不弹气泡、不切工作动画，保持低调
             return
         if working:
             self.show_bubble("收到开工信号，认真写代码啦！💻", duration_ms=2400)
-            self._switch(self._pick(self._work_pool(), exclude=self.anim))
+            self._switch(entry_animation or self._pick(self._work_pool(), exclude=self.anim))
         else:
             self.show_bubble("收工！摸鱼模式开启～🐋", duration_ms=2400)
             self._pick_next()
@@ -961,6 +1045,7 @@ class PetWindow(QWidget):
         state_changed = state != self._mirror_state
         self._mirror_state = state
         busy = bool(root.get("busy")) or state not in ("idle", "done")
+        was_busy = self.work_state
         try:
             approvals = int(root.get("approvals") or 0)
         except Exception:
@@ -994,19 +1079,26 @@ class PetWindow(QWidget):
             return
         self._mirror_done_shown = False
 
-        # 3) 常规：忙就切工作动画，闲就摸鱼（复用工作态入口，自带去抖/气泡）
-        self.set_work_state(busy, text)
-        if state_changed and busy and not quiet:
-            state_keywords = {
-                "assigned": ["女仆屈膝", "开心跃动"],
-                "thinking": ["深度思考", "专心玩魔方"],
-                "tool": ["写代码", "敲击桌面", "吃Token"],
-                "writing": ["轻快记录", "写代码"],
-                "waiting": ["东张西望", "待机呼吸"],
-                "error": ["玩游戏气急败坏", "被吓一跳"],
-            }
-            act = self._first_anim_keyword(state_keywords.get(state, []))
-            if act:
+        # 3) 常规：Office 内部会在 thinking/tool/writing 间高频切换，它们都属于
+        # 同一轮忙碌。只在整轮开始时按首个状态挑一次入场动作，之后让工作动画
+        # 自然续播；不要把每个思考片段都当成一次新的“写代码”。
+        state_keywords = {
+            "assigned": ["女仆屈膝", "开心跃动"],
+            "thinking": ["深度思考", "专心玩魔方"],
+            "tool": ["写代码", "敲击桌面", "吃Token"],
+            "writing": ["轻快记录", "写代码"],
+            "waiting": ["东张西望", "待机呼吸"],
+            "error": ["玩游戏气急败坏", "被吓一跳"],
+        }
+        entry_animation = None
+        if busy and not was_busy and not quiet:
+            entry_animation = self._first_anim_keyword(state_keywords.get(state, []))
+        self.set_work_state(busy, text, entry_animation=entry_animation)
+
+        # 报错是需要被看见的高优先级变化，允许在同一忙碌周期中打断一次。
+        if state_changed and state == "error" and was_busy and not quiet:
+            act = self._first_anim_keyword(state_keywords["error"])
+            if act and act != self.anim:
                 self._switch(act)
 
     # ---------------- 搬家：主控鲸走出办公室来到桌面 / 走回去 ----------------
@@ -1686,6 +1778,10 @@ class PetWindow(QWidget):
         return True
 
     def _on_self_talk_timeout(self) -> None:
+        if time.time() < self._bubble_busy_until:
+            # 重要气泡占用中：本次自言自语跳过，重新排队下一次
+            self._schedule_self_talk()
+            return
         if self.work_state or self.is_quiet():
             # 工作 / 开会 / 游戏时保持安静：不闲聊、不打扰（二次开发新增）
             self._schedule_self_talk()
@@ -1905,3 +2001,60 @@ class PetWindow(QWidget):
         self._cancel_animation_gap()
         self._speech_bubble.hide()
         super().closeEvent(event)
+
+    # ================================================================ 主动识屏 / Agent 联动开关（上游移植）
+    def _toggle_proactive_enabled(self, on: bool) -> None:
+        """右键菜单切换主动识屏总开关。"""
+        pro_data = dict(self.cfg.get('proactive_screen', {}))
+        pro_data['enabled'] = bool(on)
+        self.cfg.set('proactive_screen', pro_data)
+        self.cfg.save()
+        if getattr(self, 'proactive_watcher', None) is not None:
+            self.proactive_watcher.apply_config()
+        if on:
+            eff = proactive_effective_config(self.cfg.get('proactive_screen', {}))
+            if eff['whitelist']:
+                self.show_bubble("主动识屏已开启～我会偶尔看看你正在用的软件", duration_ms=4000)
+            else:
+                self.show_bubble(
+                    "主动识屏已开启～但白名单还是空的，在 右键→主动识屏→打开设置 里添加要观察的应用后我才会开始工作",
+                    duration_ms=6000,
+                )
+
+    def _set_proactive_option(self, key: str, value) -> None:
+        """右键菜单修改主动识屏子项选项。"""
+        pro_data = dict(self.cfg.get('proactive_screen', {}))
+        pro_data[key] = value
+        self.cfg.set('proactive_screen', pro_data)
+        self.cfg.save()
+        if getattr(self, 'proactive_watcher', None) is not None:
+            self.proactive_watcher.apply_config()
+
+    def _toggle_agent_link(self, agent_key: str, on: bool, action=None) -> None:
+        """右键菜单切换 Agent 状态联动子项。
+
+        set_enabled 返回 False（用户拒绝授权 / hooks 安装失败）时，
+        必须把菜单勾选态回滚，否则 UI 显示已开启而实际未生效。"""
+        mgr = getattr(self, 'agent_link_manager', None)
+        if mgr is not None:
+            ok = mgr.set_enabled(agent_key, on)
+            if not ok:
+                if action is not None:
+                    action.blockSignals(True)
+                    action.setChecked(not on)
+                    action.blockSignals(False)
+                return
+        else:
+            ag_data = dict(self.cfg.get('agent_link', {}))
+            ag_data[agent_key] = bool(on)
+            self.cfg.set('agent_link', ag_data)
+            self.cfg.save()
+        if on:
+            self.show_bubble(f"已开启 {agent_key.upper()} 状态联动监听～", duration_ms=4000)
+
+    def _set_agent_link_option(self, key: str, on: bool) -> None:
+        """联动气泡提醒子项开关（开始干活 / 任务完成），立即写入配置。"""
+        ag_data = dict(self.cfg.get('agent_link', {}))
+        ag_data[key] = bool(on)
+        self.cfg.set('agent_link', ag_data)
+        self.cfg.save()

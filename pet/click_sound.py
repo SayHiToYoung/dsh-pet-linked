@@ -1,0 +1,353 @@
+# -*- coding: utf-8 -*-
+"""通用音效播放器与内置音效解析（上游 agent_link.py 移植所需）。
+
+本分支窗口点击音效走 window.py 自有的 _play_click_sound（独立实现），
+因此这里只保留 agent_link 用到的两个入口：
+- play_sound(path, volume)：统一音频播放入口（WAV/MP3/OGG/FLAC/M4A 走 QtMultimedia）；
+- resolve_builtin_sound(id)：解析内置音效路径（Agent 生命周期音效）。
+
+QtMultimedia 不可用时静默失败并记录 warning，绝不使用系统提示音替代；
+非 Windows 平台在 QtMultimedia 缺失时回退到系统播放器。
+"""
+from __future__ import annotations
+
+import logging
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import wave
+from pathlib import Path
+from typing import Any
+
+log = logging.getLogger("pet.click_sound")
+
+_qt_player = None
+_qt_audio = None
+_qt_effects: dict[str, Any] = {}
+_qt_decoders: dict[str, Any] = {}
+_qt_player_pool: list[tuple[Any, Any]] = []
+_qt_player_index = 0
+_qt_import_failed = False
+_qt_classes: tuple[Any, ...] | None = None
+_PLAYER_POOL_SIZE = 4
+_wav_duration_cache: dict[str, float] = {}
+
+
+def _qt_available() -> bool:
+    """惰性探测 QtMultimedia；失败只记一次日志。"""
+    global _qt_import_failed
+    if _qt_import_failed:
+        return False
+    try:
+        from PySide6.QtMultimedia import QAudioDecoder, QAudioOutput, QMediaPlayer, QSoundEffect  # noqa: F401
+
+        return True
+    except Exception as exc:  # 打包遗漏/精简环境缺失时兜底
+        _qt_import_failed = True
+        log.warning("QtMultimedia 不可用，音效将降级或静默失败: %s", exc)
+        return False
+
+
+def _ensure_qt_player():
+    """返回模块级单例播放器；不可用返回 None。
+
+    播放器必须持久化，否则 Python GC 会在播放开始前回收对象。
+    """
+    global _qt_player, _qt_audio
+    if _qt_player is not None:
+        return _qt_player
+    if not _qt_available():
+        return None
+    try:
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+
+        _qt_player = QMediaPlayer()
+        _qt_audio = QAudioOutput()
+        _qt_audio.setVolume(1.0)
+        _qt_player.setAudioOutput(_qt_audio)
+        return _qt_player
+    except Exception:
+        log.exception("创建 QMediaPlayer 失败")
+        return None
+
+
+def _qt_multimedia_classes():
+    """Load multimedia classes lazily so headless/minimal installs can import this module."""
+    global _qt_classes, _qt_import_failed
+    if _qt_classes is not None:
+        return _qt_classes
+    if not _qt_available():
+        return None
+    try:
+        from PySide6.QtMultimedia import QAudioDecoder, QAudioFormat, QAudioOutput, QMediaPlayer, QSoundEffect
+        _qt_classes = (QAudioDecoder, QAudioFormat, QAudioOutput, QMediaPlayer, QSoundEffect)
+        return _qt_classes
+    except Exception as exc:
+        _qt_import_failed = True
+        log.warning("QtMultimedia 音效类不可用: %s", exc)
+        return None
+
+
+def _sound_cache_dir() -> Path:
+    try:
+        from PySide6.QtCore import QStandardPaths
+        base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
+    except Exception:
+        base = ""
+    root = Path(base) if base else Path(tempfile.gettempdir()) / "dsh-pet"
+    result = root / "sounds_cache"
+    result.mkdir(parents=True, exist_ok=True)
+    return result
+
+
+def _cache_path(source: Path) -> Path:
+    stat = source.stat()
+    key = hashlib.sha256(f"{source.resolve()}:{stat.st_mtime_ns}:{stat.st_size}".encode()).hexdigest()[:20]
+    return _sound_cache_dir() / f"{source.stem}-{key}.wav"
+
+
+def _wav_duration(path: Path) -> float:
+    """Read and cache duration from a decoded WAV header."""
+    key = str(path.resolve())
+    if key in _wav_duration_cache:
+        return _wav_duration_cache[key]
+    try:
+        with wave.open(str(path), "rb") as source:
+            duration = source.getnframes() / max(1, source.getframerate())
+    except (OSError, EOFError, wave.Error):
+        duration = 0.0
+    _wav_duration_cache[key] = duration
+    return duration
+
+
+def _effect_for(path: Path):
+    classes = _qt_multimedia_classes()
+    if classes is None:
+        return None
+    key = str(path.resolve())
+    effect = _qt_effects.get(key)
+    if effect is None:
+        try:
+            from PySide6.QtCore import QUrl
+            effect = classes[4]()
+            effect.setSource(QUrl.fromLocalFile(str(path)))
+            _qt_effects[key] = effect
+        except Exception:
+            log.exception("创建 QSoundEffect 失败: %s", path)
+            return None
+    return effect
+
+
+def _play_with_effect(path: Path, volume: float) -> bool:
+    effect = _effect_for(path)
+    if effect is None:
+        return False
+    try:
+        effect.setVolume(volume)
+        effect.play()  # QSoundEffect.play() restarts the short sound immediately.
+        return True
+    except Exception:
+        log.exception("QSoundEffect 播放失败: %s", path)
+        return False
+
+
+def _warm_player_pool() -> None:
+    """预创建 QMediaPlayer 池，避免首次播放时初始化 QtMultimedia 造成卡顿。"""
+    classes = _qt_multimedia_classes()
+    if classes is None:
+        return
+    try:
+        if not _qt_player_pool:
+            if _qt_player is not None and _qt_audio is not None:
+                _qt_player_pool.append((_qt_player, _qt_audio))
+            for _ in range(_PLAYER_POOL_SIZE):
+                if len(_qt_player_pool) >= _PLAYER_POOL_SIZE:
+                    break
+                player, audio = classes[3](), classes[2]()
+                player.setAudioOutput(audio)
+                _qt_player_pool.append((player, audio))
+    except Exception:
+        log.exception("预创建 QMediaPlayer 池失败")
+
+
+def _player_pool_play(path: Path, volume: float) -> bool:
+    global _qt_player_index
+    classes = _qt_multimedia_classes()
+    if classes is None:
+        return False
+    try:
+        _warm_player_pool()
+        if not _qt_player_pool:
+            return False
+        player, audio = _qt_player_pool[_qt_player_index % len(_qt_player_pool)]
+        _qt_player_index += 1
+        audio.setVolume(volume)
+        player.stop()
+        from PySide6.QtCore import QUrl
+        player.setSource(QUrl.fromLocalFile(str(path)))
+        player.play()
+        return True
+    except Exception:
+        log.exception("QMediaPlayer 池播放失败: %s", path)
+        return False
+
+
+def _audio_buffer_bytes(buffer) -> bytes:
+    data = buffer.data()
+    try:
+        return bytes(data)
+    except (TypeError, ValueError):
+        return bytes(data.constData())
+
+
+def _decode_to_wav(source: Path, cache: Path, volume: float) -> bool:
+    classes = _qt_multimedia_classes()
+    if classes is None:
+        return False
+    try:
+        decoder = classes[0]()
+        # 统一输出 16-bit PCM：源是浮点（如 mp3float）时直接写 WAV 会被
+        # 当 PCM32 播放成噪音，QSoundEffect 也只认整型 PCM
+        try:
+            requested = classes[1]()
+            requested.setSampleRate(48000)
+            requested.setChannelCount(2)
+            requested.setSampleFormat(classes[1].SampleFormat.Int16)
+            decoder.setAudioFormat(requested)
+        except Exception:
+            log.warning("设置解码输出格式失败，按源格式解码: %s", source)
+        state = {"chunks": [], "format": None}
+        def on_buffer_ready():
+            while decoder.bufferAvailable():
+                buffer = decoder.read()
+                state["format"] = buffer.format()
+                state["chunks"].append(_audio_buffer_bytes(buffer))
+        def on_finished():
+            _qt_decoders.pop(str(source.resolve()), None)
+            fmt = state["format"]
+            if not fmt or not state["chunks"]:
+                log.warning("音频解码没有产生 PCM: %s", source)
+                return
+            try:
+                sample_format = fmt.sampleFormat()
+                # PySide6 返回 SampleFormat 枚举（不能直接 int()），mock/旧版返回 int
+                sample_width = {1: 1, 2: 2, 3: 4, 4: 4}.get(
+                    int(getattr(sample_format, "value", sample_format)), 2)
+                cache.parent.mkdir(parents=True, exist_ok=True)
+                with wave.open(str(cache), "wb") as out:
+                    out.setnchannels(fmt.channelCount())
+                    out.setsampwidth(sample_width)
+                    out.setframerate(fmt.sampleRate())
+                    out.writeframes(b"".join(state["chunks"]))
+            except Exception:
+                log.exception("写入音效缓存失败: %s", cache)
+        decoder.bufferReady.connect(on_buffer_ready)
+        decoder.finished.connect(on_finished)
+        error_signal = getattr(decoder, "error", None)
+        if error_signal is not None and hasattr(error_signal, "connect"):
+            error_signal.connect(lambda *_: log.warning("音频解码失败: %s", source))
+        from PySide6.QtCore import QUrl
+        decoder.setSource(QUrl.fromLocalFile(str(source)))
+        _qt_decoders[str(source.resolve())] = decoder
+        decoder.start()
+        return True
+    except Exception:
+        log.exception("启动音频解码失败: %s", source)
+        return False
+
+
+def _play_with_qt(path: Path, volume: float = 1.0) -> bool:
+    if path.suffix.lower() == ".wav":
+        return _play_with_effect(path, volume)
+
+    cache = _cache_path(path)
+    if cache.is_file() and _play_with_effect(cache, volume):
+        return True
+
+    # The decoder is asynchronous. Keep the first play audible through the
+    # pool, while the finished callback warms the low-latency effect cache.
+    key = str(path.resolve())
+    if key not in _qt_decoders and _decode_to_wav(path, cache, volume):
+        _player_pool_play(path, volume)
+        return True
+    return _player_pool_play(path, volume)
+
+
+def _play_with_system_player(path: Path) -> bool:
+    """非 Windows 回退：afplay / paplay / aplay。"""
+    player = shutil.which("afplay") or shutil.which("paplay") or shutil.which("aplay")
+    if not player:
+        return False
+    command = [player, str(path)]
+    if Path(player).name == "aplay":
+        command.insert(1, "-q")
+    try:
+        subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except OSError:
+        log.exception("系统播放器失败: %s", player)
+        return False
+
+
+def resolve_builtin_sound(sound_id: str) -> Path | None:
+    """统一解析内置音频路径（支持源码目录与 PyInstaller sys._MEIPASS）。"""
+    s_id = str(sound_id or "").strip()
+    if s_id.startswith("builtin:"):
+        s_id = s_id[len("builtin:"):]
+
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    sounds_dir = root / "assets" / "sounds"
+
+    # Agent 音效别名或直接文件名
+    agent_map = {
+        "agent-start": sounds_dir / "agent" / "start.wav",
+        "agent-done": sounds_dir / "agent" / "done.wav",
+        "agent-error": sounds_dir / "agent" / "error.wav",
+    }
+    if s_id in agent_map:
+        target = agent_map[s_id]
+        return target if target.is_file() else None
+
+    # 点击音效内置包
+    if s_id == "default":
+        target = sounds_dir / "click.wav"
+        return target if target.is_file() else None
+
+    return None
+
+
+def play_sound(path: Path | str, volume: float = 1.0) -> bool:
+    """统一音频播放入口。返回 True 表示已提交播放。"""
+    try:
+        target = Path(path)
+    except (TypeError, ValueError):
+        return False
+    if not target.is_file():
+        return False
+    # 取证日志：任何宠物侧发声都必须留痕（排查"莫名音效"用）
+    try:
+        import traceback
+        caller = ""
+        for frame in reversed(traceback.extract_stack()[-6:-1]):
+            if "click_sound.py" not in frame.filename:
+                caller = f"{Path(frame.filename).name}:{frame.lineno}"
+                break
+        log.info("播放音效 path=%s vol=%.2f caller=%s", target, volume, caller)
+    except Exception:
+        pass
+
+    # WAV and decoded short effects use QSoundEffect; compressed sources use
+    # the decoder/cache path and a small player pool while warming up.
+    if _play_with_qt(target, volume):
+        return True
+
+    # 非 Windows 回退系统播放器
+    if os.name != "nt":
+        return _play_with_system_player(target)
+
+    log.warning("QtMultimedia 不可用，音频播放跳过: %s", target)
+    return False
