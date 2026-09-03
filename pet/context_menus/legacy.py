@@ -38,6 +38,9 @@ def build_legacy_menu(menu: QMenu, pet, template: dict) -> None:
         add_action(menu, "AI 设置", None, chat_settings, close_on_trigger=True)
     if legacy_settings is not None:
         add_action(menu, "桌宠设置", None, legacy_settings, close_on_trigger=True)
+    memory_report = getattr(pet, "__dict__", {}).get("on_memory_report")
+    if memory_report is not None:
+        add_action(menu, "让小鲸整理今天", None, memory_report, close_on_trigger=True)
 
     menu.addSeparator()
     build_animation_categories(menu, pet, icons=False, legacy_labels=True)

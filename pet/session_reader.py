@@ -10,7 +10,9 @@ DSH 会话日志读取（二次开发新增）—— 直接读 DSH 落盘的会�
 """
 from __future__ import annotations
 
+import copy
 import json
+import io
 import os
 import re
 import zstandard
@@ -20,6 +22,10 @@ from pathlib import Path
 from . import token_cost as token_cost_mod
 
 DEFAULT_SESSIONS_ROOT = Path.home() / ".dsh" / "sessions"
+
+_SESSION_USAGE_CACHE: dict = {}
+_LATEST_USER_CACHE: dict = {}
+_AGG_RESULT_CACHE: dict = {}
 
 # 一个回合的 usage 形状（同 DSH mapUsage）
 _USAGE_KEYS = ("inputTokens", "outputTokens", "cacheReadTokens", "reasoningTokens")
@@ -54,6 +60,14 @@ def workspace_dir() -> Path:
 def _session_id_of(path: Path) -> str:
     """从 session-<uuid>/session.jsonl.zstd 提取 session id。"""
     return path.parent.name
+
+
+def _file_stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
 
 
 def find_current_session_file(root: Path | None = None) -> Path | None:
@@ -120,6 +134,30 @@ def _decompress_all_fallback(data: bytes) -> str:
     return b"".join(out_chunks).decode("utf-8", "replace")
 
 
+def _iter_json_events(path: Path):
+    """流式读取拼接 zstd 帧中的 JSON 事件，避免把整个历史解压进内存。
+
+    DSH 正在追加日志时，末尾可能暂时是不完整帧。stream_reader 会先产出所有
+    完整数据；尾部异常只终止本轮读取，下次轮询自然补上。
+    """
+    try:
+        with path.open("rb") as source:
+            dctx = zstandard.ZstdDecompressor()
+            with dctx.stream_reader(source, read_across_frames=True) as reader:
+                with io.TextIOWrapper(reader, encoding="utf-8", errors="replace") as text:
+                    for line in text:
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except (TypeError, ValueError):
+                            continue
+                        if isinstance(event, dict):
+                            yield event
+    except (OSError, EOFError, zstandard.ZstdError):
+        return
+
+
 def _period_start_ms(period: str, now: float | None = None) -> float:
     """返回时间筛选起点（毫秒）；'all'/'今日'/'本周'/'本月' 之外或空 → 0（不过滤）。
 
@@ -159,23 +197,17 @@ def read_session_usage(path: Path, period: str = "all") -> tuple[str, dict, str,
         return {"input": 0, "output": 0, "cacheRead": 0, "reasoning": 0}
 
     start_ms = _period_start_ms(period)
+    cache_key = (str(path), str(period), start_ms)
+    stamp = _file_stamp(path)
+    cached = _SESSION_USAGE_CACHE.get(cache_key)
+    if stamp is not None and cached is not None and cached[0] == stamp:
+        return copy.deepcopy(cached[1])
     sid = _session_id_of(path)
     totals = _empty()
     per_model: dict[str, dict] = {}
     model = ""
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return sid, totals, model, per_model
-    text = _decompress_all(raw)
     seen: set[tuple] = set()
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except Exception:
-            continue
+    for ev in _iter_json_events(path):
         if start_ms and (ev.get("time") or 0) < start_ms:
             continue
         data = ev.get("data") if isinstance(ev, dict) else None
@@ -213,7 +245,10 @@ def read_session_usage(path: Path, period: str = "all") -> tuple[str, dict, str,
             bucket["total"][k] += n
             if "peak" in bucket:
                 bucket[tier][k] += n
-    return sid, totals, model, per_model
+    result = (sid, totals, model, per_model)
+    if stamp is not None:
+        _SESSION_USAGE_CACHE[cache_key] = (stamp, result)
+    return copy.deepcopy(result)
 
 
 # 全量聚合缓存：path -> ((mtime,size), totals)；文件没变就不重解析
@@ -273,17 +308,7 @@ def _latest_message(path: Path, event_type: str) -> tuple[str, str]:
     """扫描会话日志，返回指定事件类型的最后一条含文本消息 (指纹, 文本)。"""
     fingerprint = ""
     text = ""
-    try:
-        raw = path.read_bytes()
-    except OSError:
-        return fingerprint, text
-    for line in _decompress_all(raw).splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except Exception:
-            continue
+    for ev in _iter_json_events(path):
         if ev.get("type") != event_type:
             continue
         data = ev.get("data")
@@ -320,6 +345,48 @@ def _workspace_dirs(base: Path) -> list[Path]:
     return [p for p in base.iterdir() if p.is_dir()]
 
 
+def _session_files(base: Path) -> list[Path]:
+    files: list[Path] = []
+    for ws in _workspace_dirs(base):
+        try:
+            for sess in ws.iterdir():
+                candidate = sess / "session.jsonl.zstd"
+                if sess.is_dir() and candidate.is_file():
+                    files.append(candidate)
+        except OSError:
+            continue
+    return files
+
+
+def _latest_user_record(path: Path) -> tuple[float, str, str, str] | None:
+    """返回单文件最新真实用户消息，并按文件版本缓存。"""
+    stamp = _file_stamp(path)
+    key = str(path)
+    cached = _LATEST_USER_CACHE.get(key)
+    if stamp is not None and cached is not None and cached[0] == stamp:
+        return cached[1]
+    sid = _session_id_of(path)
+    best = None
+    for ev in _iter_json_events(path):
+        if ev.get("type") != "user/message":
+            continue
+        data = ev.get("data")
+        if not isinstance(data, dict):
+            continue
+        text = _data_text(data)
+        if not text or _looks_like_secret(text):
+            continue
+        seq = ev.get("seq")
+        if seq is None:
+            seq = ev.get("seq0")
+        candidate = (float(ev.get("time") or 0), sid, f"{sid}:{seq}", text)
+        if best is None or candidate[0] > best[0]:
+            best = candidate
+    if stamp is not None:
+        _LATEST_USER_CACHE[key] = (stamp, best)
+    return best
+
+
 def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]:
     """扫描所有工作区的所有会话，返回最新一条用户文本消息 (session_id, fingerprint, text)。
 
@@ -329,43 +396,10 @@ def latest_user_message_global(root: Path | None = None) -> tuple[str, str, str]
     """
     base = root or sessions_root()
     best = None  # (time, session_id, fingerprint, text)
-    for ws in _workspace_dirs(base):
-        try:
-            for sess in ws.iterdir():
-                if not sess.is_dir():
-                    continue
-                f = sess / "session.jsonl.zstd"
-                if not f.is_file():
-                    continue
-                sid = _session_id_of(f)
-                try:
-                    raw = f.read_bytes()
-                except OSError:
-                    continue
-                for line in _decompress_all(raw).splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except Exception:
-                        continue
-                    if ev.get("type") != "user/message":
-                        continue
-                    data = ev.get("data")
-                    if not isinstance(data, dict):
-                        continue
-                    text = _data_text(data)
-                    if not text or _looks_like_secret(text):
-                        continue
-                    seq = ev.get("seq")
-                    if seq is None:
-                        seq = ev.get("seq0")
-                    ts = ev.get("time", 0)
-                    fingerprint = f"{sid}:{seq}"
-                    if best is None or ts > best[0]:
-                        best = (ts, sid, fingerprint, text)
-        except OSError:
-            continue
+    for path in _session_files(base):
+        candidate = _latest_user_record(path)
+        if candidate is not None and (best is None or candidate[0] > best[0]):
+            best = candidate
     if best is None:
         return "", "", ""
     return best[1], best[2], best[3]
@@ -380,20 +414,9 @@ def _scan_usage_events(f: Path) -> list[tuple]:
     以便事件列表可安全缓存。）
     """
     events: list[tuple] = []
-    try:
-        raw = f.read_bytes()
-    except OSError:
-        return events
-    text = _decompress_all(raw)
     seen: set[tuple] = set()
     model = ""
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except Exception:
-            continue
+    for ev in _iter_json_events(f):
         data = ev.get("data") if isinstance(ev, dict) else None
         if not isinstance(data, dict):
             continue
@@ -444,48 +467,53 @@ def aggregate_all_sessions(root: Path | None = None, period: str = "all") -> tup
     start_ms = _period_start_ms(period)
     if not base.is_dir():
         return grand, grand_model
+    files = _session_files(base)
+    signature = tuple(sorted(
+        (str(path), stamp) for path in files
+        if (stamp := _file_stamp(path)) is not None
+    ))
+    result_key = (str(base), str(period), start_ms)
+    cached_result = _AGG_RESULT_CACHE.get(result_key)
+    if cached_result is not None and cached_result[0] == signature:
+        return copy.deepcopy(cached_result[1])
     try:
-        for ws in base.iterdir():
-            if not ws.is_dir():
+        for f in files:
+            try:
+                st = f.stat()
+                stamp = (st.st_mtime_ns, st.st_size)
+            except OSError:
                 continue
-            for sess in ws.iterdir():
-                f = sess / "session.jsonl.zstd"
-                if not f.is_file():
-                    continue
-                try:
-                    st = f.stat()
-                    stamp = (st.st_mtime, st.st_size)
-                except OSError:
-                    continue
-                key = str(f)
-                cached = _AGG_CACHE.get(key)
-                if cached is not None and cached[0] == stamp:
-                    events = cached[1]
-                else:
-                    events = _scan_usage_events(f)
-                    _AGG_CACHE[key] = (stamp, events)
-                for fp, mkey, is_peak, usage in events:
-                    if start_ms and (fp[0] or 0) < start_ms:
-                        continue  # 时间筛选
-                    if fp in seen_global:
-                        continue  # 跨文件重复事件，只计一次
-                    seen_global.add(fp)
-                    for k in grand:
-                        grand[k] += usage[k]
-                    gb = grand_model.get(mkey)
-                    if gb is None:
-                        gb = {"total": {k: 0 for k in grand}}
-                        if token_cost_mod.model_has_peak_off_peak(mkey):
-                            gb["peak"] = {k: 0 for k in grand}
-                            gb["off"] = {k: 0 for k in grand}
-                        grand_model[mkey] = gb
-                    for k in grand:
-                        gb["total"][k] += usage[k]
-                        if "peak" in gb:
-                            gb["peak" if is_peak else "off"][k] += usage[k]
+            key = str(f)
+            cached = _AGG_CACHE.get(key)
+            if cached is not None and cached[0] == stamp:
+                events = cached[1]
+            else:
+                events = _scan_usage_events(f)
+                _AGG_CACHE[key] = (stamp, events)
+            for fp, mkey, is_peak, usage in events:
+                if start_ms and (fp[0] or 0) < start_ms:
+                    continue  # 时间筛选
+                if fp in seen_global:
+                    continue  # 跨文件重复事件，只计一次
+                seen_global.add(fp)
+                for k in grand:
+                    grand[k] += usage[k]
+                gb = grand_model.get(mkey)
+                if gb is None:
+                    gb = {"total": {k: 0 for k in grand}}
+                    if token_cost_mod.model_has_peak_off_peak(mkey):
+                        gb["peak"] = {k: 0 for k in grand}
+                        gb["off"] = {k: 0 for k in grand}
+                    grand_model[mkey] = gb
+                for k in grand:
+                    gb["total"][k] += usage[k]
+                    if "peak" in gb:
+                        gb["peak" if is_peak else "off"][k] += usage[k]
     except OSError:
         pass
-    return grand, grand_model
+    result = (grand, grand_model)
+    _AGG_RESULT_CACHE[result_key] = (signature, result)
+    return copy.deepcopy(result)
 
 
 def latest_user_message_time(root: Path | None = None) -> float:
@@ -496,38 +524,10 @@ def latest_user_message_time(root: Path | None = None) -> float:
     """
     base = root or sessions_root()
     best = 0.0
-    for ws in _workspace_dirs(base):
-        try:
-            for sess in ws.iterdir():
-                if not sess.is_dir():
-                    continue
-                f = sess / "session.jsonl.zstd"
-                if not f.is_file():
-                    continue
-                try:
-                    raw = f.read_bytes()
-                except OSError:
-                    continue
-                for line in _decompress_all(raw).splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        ev = json.loads(line)
-                    except Exception:
-                        continue
-                    if ev.get("type") != "user/message":
-                        continue
-                    data = ev.get("data")
-                    if not isinstance(data, dict):
-                        continue
-                    text = _data_text(data)
-                    if not text or _looks_like_secret(text):
-                        continue
-                    ts = ev.get("time", 0)
-                    if ts > best:
-                        best = ts
-        except OSError:
-            continue
+    for path in _session_files(base):
+        candidate = _latest_user_record(path)
+        if candidate is not None and candidate[0] > best:
+            best = candidate[0]
     return best
 
 
@@ -577,18 +577,7 @@ def collect_model_names(root: Path | None = None, limit: int = 50) -> list[str]:
 def _scan_model_names(f: Path) -> list[tuple[str, float]]:
     """扫描单个会话日志，返回 [(model, first_time_ms), ...]（按出现顺序）。"""
     out: list[tuple[str, float]] = []
-    try:
-        raw = f.read_bytes()
-    except OSError:
-        return out
-    text = _decompress_all(raw)
-    for line in text.splitlines():
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except Exception:
-            continue
+    for ev in _iter_json_events(f):
         data = ev.get("data") if isinstance(ev, dict) else None
         if not isinstance(data, dict):
             continue

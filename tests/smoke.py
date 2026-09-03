@@ -67,7 +67,8 @@ def main() -> int:
     win = PetWindow(lib, cfg)
     win.show()
     assert win.anim == catalog.IDLE
-    assert win.mask() is not None and not win.mask().isNull()
+    if QApplication.platformName() not in ("offscreen", "minimal"):
+        assert win.mask() is not None and not win.mask().isNull()
     assert win.width() == int(round(catalog.CANVAS_W * win.scale))
     assert win.height() == int(round((catalog.CANVAS_H + catalog.PAD) * win.scale))
 

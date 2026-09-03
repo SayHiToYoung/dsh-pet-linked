@@ -15,6 +15,7 @@ import os
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
@@ -34,8 +35,15 @@ from .meeting_care import MeetingCare
 from .library import MovieLibrary
 from .window import PetWindow
 from .work_state import WorkStateServer
-from .context_aware import ContextAwareMonitor
-from . import session_reader
+from .context_aware import ContextAwareMonitor, detect_foreground_app
+from .activity_memory import (
+    ActivityCollector,
+    ProjectEnricher,
+    SharedMemoryStore,
+    detect_system_idle_seconds,
+    explicit_emotion_label,
+)
+from .memory_sync import MemorySyncManager
 from . import emotion_actor
 from .fun_image_popup import restore_ojingjing_windows
 from .runtime_cleanup import cleanup_stale_runtime_dirs
@@ -93,6 +101,7 @@ class _WorkStateBridge(QObject):
     handoff = Signal(object)      # 办公区触发「搬家」→ 走入/走回动画
     companion_recovered = Signal(object)  # Office 失联/交接超时 → 桌面安全恢复
     context = Signal(str, object) # 情境感知：前台应用 → 桌宠行为（会议躲起/游戏安静）
+    memory_notice = Signal(str)   # 本地记忆/报信状态 → 低打扰气泡
 
     def __init__(self, controller) -> None:
         super().__init__()
@@ -105,6 +114,7 @@ class _WorkStateBridge(QObject):
         self.handoff.connect(self._apply_handoff)
         self.companion_recovered.connect(self._apply_companion_recovered)
         self.context.connect(self._apply_context)
+        self.memory_notice.connect(self._apply_memory_notice)
 
     def _apply(self, working: bool, detail: str) -> None:
         win = self.controller.win
@@ -217,6 +227,15 @@ class _WorkStateBridge(QObject):
             except Exception:
                 logging.exception("情境感知应用失败")
 
+    def _apply_memory_notice(self, line: str) -> None:
+        win = self.controller.win
+        if win is None or not line or getattr(win, "is_quiet", lambda: False)():
+            return
+        try:
+            win.show_bubble(str(line), duration_ms=5200)
+        except Exception:
+            logging.exception("记忆报信气泡失败")
+
 
 def _setup_logging(config: Config) -> None:
     config.dir.mkdir(parents=True, exist_ok=True)
@@ -296,6 +315,23 @@ class PetApp:
             self.config.get("meeting_care_thresholds") or None,
             enabled=bool(self.config.get("meeting_care_enabled", True)),
         )
+        memory_path = self.config.dir / "memory" / "shared_memory.json"
+        roots = self.config.get("memory_project_roots") or []
+        roots = roots if isinstance(roots, list) else []
+        self.memory_store = SharedMemoryStore(memory_path)
+        self.activity_collector = ActivityCollector(
+            self.memory_store,
+            project_enricher=ProjectEnricher(roots),
+            idle_seconds=float(self.config.get("memory_idle_seconds", 180) or 180),
+            min_segment_seconds=float(self.config.get("memory_min_segment_seconds", 20) or 20),
+        )
+        self.memory_sync = MemorySyncManager(self.config, self.memory_store)
+        self.memory_sync.delivered.connect(self._on_memory_delivered)
+        self._shutdown_done = False
+        about_to_quit = getattr(self.app, "aboutToQuit", None)
+        connect = getattr(about_to_quit, "connect", None)
+        if callable(connect):
+            connect(self._shutdown_runtime)
 
     # ------------------------------------------------------------ 启动
     def start(self) -> None:
@@ -307,6 +343,7 @@ class PetApp:
         self._start_work_state()
         self._start_ledger_timer()
         self._start_context_monitor()
+        self.memory_sync.start()
         QTimer.singleShot(3500, self._check_autostart_wanted)
 
     # ------------------------------------------------------------ DSH 工作状态联动
@@ -482,6 +519,9 @@ class PetApp:
         if self._context_timer is not None:
             return
         self._context_monitor = ContextAwareMonitor(
+            detector=lambda: detect_foreground_app(
+                include_title=bool(self.config.get("memory_collect_window_titles", True))
+            ),
             on_change=self._on_context_change,
             rules=self._context_rules,
             enabled=self._context_enabled,
@@ -517,6 +557,14 @@ class PetApp:
     def _context_worker(self) -> None:
         try:
             snap = self._context_monitor.sample()
+            idle_seconds = detect_system_idle_seconds()
+            if bool(self.config.get("memory_collection_enabled", True)):
+                self.activity_collector.observe(
+                    snap.get("app") if isinstance(snap.get("app"), dict) else {},
+                    str(snap.get("context") or "idle"),
+                    idle_for_seconds=idle_seconds,
+                )
+                self._maybe_show_memory_notice(idle_seconds)
             # 会议关怀：按当前情境 tick（开会计时、散会结算补播台词）
             if self._meeting_care.enabled:
                 result = self._meeting_care.tick(
@@ -530,6 +578,75 @@ class PetApp:
             logging.exception("情境探测异常")
         finally:
             self._context_busy = False
+
+    def _maybe_show_memory_notice(self, idle_seconds: float = 0.0) -> None:
+        """工作日结束或傍晚离开电脑时，每天最多显示一次记忆提示。"""
+        now = datetime.now()
+        raw_end = str(self.config.get("memory_workday_end", "18:00") or "18:00")
+        try:
+            hour, minute = (int(part) for part in raw_end.split(":", 1))
+        except (TypeError, ValueError):
+            hour, minute = 18, 0
+        reached_end = (now.hour, now.minute) >= (max(0, min(23, hour)), max(0, min(59, minute)))
+        left_near_end = idle_seconds >= 10 * 60 and now.hour >= max(12, hour - 1)
+        if not (reached_end or left_near_end):
+            return
+        if not self.memory_store.pending_reports(limit=1):
+            # 全天只停留在一个应用时，当前段尚未自然结束；到报信时刻先做一次
+            # 截止结算，下一轮采样会从当前时刻继续，时长不会重复。
+            self.activity_collector.flush()
+        if not self.memory_store.pending_reports(limit=1):
+            return
+        if self.memory_store.mark_notice_shown(now.date().isoformat()):
+            self._work_bridge.memory_notice.emit("今天的我记下啦，等大鲸接收时我再告诉你 🌊")
+            self.memory_sync.trigger()
+
+    def report_memory_now(self) -> None:
+        """用户主动触发本地报信准备；服务器未接入前绝不伪造“已收到”。"""
+        self.activity_collector.flush()
+        pending = self.memory_store.pending_reports(limit=1000)
+        if not pending:
+            self._work_bridge.memory_notice.emit("今天还没有记到足够长的活动，我再陪你一会儿～")
+            return
+        if self.memory_sync.trigger(force=True):
+            self._work_bridge.memory_notice.emit(
+                f"今天的我记下啦，正在把 {len(pending)} 条报给大鲸 🌊"
+            )
+        else:
+            self._work_bridge.memory_notice.emit(
+                f"今天的我记下啦，已经整理好 {len(pending)} 条；开启记忆同步后就能报给大鲸 🌊"
+            )
+
+    def _on_memory_delivered(self, count: int) -> None:
+        """一次同步只提示一次，避免多个小批次连续刷屏。"""
+        if int(count) > 0:
+            self._work_bridge.memory_notice.emit("大鲸那边已经收到啦～")
+
+    def acknowledge_memory_report(self, batch_id: str) -> bool:
+        """供未来服务器同步层调用；只有真实 ACK 才显示“已经收到”。"""
+        acknowledged = self.memory_store.acknowledge_report(batch_id)
+        if acknowledged:
+            self._work_bridge.memory_notice.emit("大鲸那边已经收到啦～")
+        return acknowledged
+
+    def record_user_emotion(self, text: str, message_id: str = "") -> bool:
+        label = explicit_emotion_label(text)
+        if not label:
+            return False
+        _, added = self.memory_store.append_emotion(text, label, message_id)
+        return added
+
+    def _shutdown_runtime(self) -> None:
+        if self._shutdown_done:
+            return
+        self._shutdown_done = True
+        try:
+            self.activity_collector.flush()
+        except Exception:
+            logging.exception("退出时结算桌面记忆失败")
+        self.memory_sync.stop()
+        if self.win is not None:
+            self.win.shutdown_media()
 
     def _on_context_change(self, context: str, app: dict) -> None:
         # 工作线程 → Qt 主线程（Signal 队列投递）
@@ -761,6 +878,8 @@ class PetApp:
         win.on_open_modern_settings = self.open_modern_settings
         win.on_spawn_pet = self.spawn_pet
         win.on_restore_fun_windows = restore_ojingjing_windows
+        win.on_memory_report = self.report_memory_now
+        win.on_user_chat_message = self.record_user_emotion
         win.on_hidden = self._notify_pet_hidden
         win.show()
 
@@ -774,6 +893,7 @@ class PetApp:
 
         if old_win is not None:
             old_win.hide(notify=False)
+            old_win.shutdown_media()
             old_tray.hide() if old_tray is not None else None
             QTimer.singleShot(0, old_win.deleteLater)
             if old_tray is not None:
@@ -816,6 +936,8 @@ class PetApp:
         win.on_open_modern_settings = self.open_modern_settings
         win.on_spawn_pet = self.spawn_pet
         win.on_restore_fun_windows = restore_ojingjing_windows
+        win.on_memory_report = self.report_memory_now
+        win.on_user_chat_message = self.record_user_emotion
         win.on_hidden = self._notify_pet_hidden
         win.show()
 
@@ -827,6 +949,7 @@ class PetApp:
         self.tray = tray
 
         old_win.hide(notify=False)
+        old_win.shutdown_media()
         if old_tray is not None:
             old_tray.hide()
         QTimer.singleShot(0, old_win.deleteLater)
@@ -996,6 +1119,8 @@ class PetApp:
         self._apply_balance_timer()
         self._reload_proactive_care()
         self._reload_meeting_care()
+        self._reload_activity_memory()
+        self.memory_sync.apply_config()
         self._refresh_chat_windows()
         _mac_set_dock_icon_visible(bool(self.config.get("show_dock_icon", True)))
 
@@ -1005,6 +1130,21 @@ class PetApp:
             self._care = ProactiveCare(self.config.get("proactive_care_thresholds") or {})
         except Exception:
             logging.exception("主动关怀配置重载失败")
+
+    def _reload_activity_memory(self) -> None:
+        """设置保存后结算旧段并按新阈值重建采集器。"""
+        try:
+            self.activity_collector.flush()
+            roots = self.config.get("memory_project_roots") or []
+            roots = roots if isinstance(roots, list) else []
+            self.activity_collector = ActivityCollector(
+                self.memory_store,
+                project_enricher=ProjectEnricher(roots),
+                idle_seconds=float(self.config.get("memory_idle_seconds", 180) or 180),
+                min_segment_seconds=float(self.config.get("memory_min_segment_seconds", 20) or 20),
+            )
+        except Exception:
+            logging.exception("日常记忆配置重载失败")
 
     def _reload_meeting_care(self) -> None:
         """设置保存后重建会议关怀状态机（开关/档位即时生效，无需重启）。"""
@@ -1092,6 +1232,12 @@ def _mac_set_dock_icon_visible(visible: bool) -> None:
     of the Dock. Pet tool windows own their independent visibility/focus flags.
     """
     if sys.platform != 'darwin':
+        return
+    try:
+        from PySide6.QtGui import QGuiApplication
+        if QGuiApplication.instance() is not None and QGuiApplication.platformName() != "cocoa":
+            return
+    except Exception:
         return
     try:
         import ctypes

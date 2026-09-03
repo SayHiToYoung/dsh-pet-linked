@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
@@ -27,8 +28,13 @@ from . import catalog
 
 logger = logging.getLogger(__name__)
 
-# 进程内元数据缓存：避免反复切换角色时重复调用 count_frames_and_secs
-_META_CACHE: dict[str, tuple[int, float]] = {}
+# 进程内元数据缓存：(源帧率, 时长)，避免切换角色时重复启动 ffmpeg。
+_META_CACHE: dict[str, tuple[float, float]] = {}
+
+# 桌宠常驻时，24/30fps 的透明 VP9 解码会持续占用明显 CPU。15fps 对这种
+# 小尺寸、缓慢动作仍足够自然，同时能把解码与 GUI 上传像素的次数近乎减半。
+MAX_RENDER_FPS = 15.0
+FRAME_QUEUE_SIZE = 3
 
 try:
     import imageio_ffmpeg
@@ -58,13 +64,17 @@ class WebMClip(QObject):
         # 元数据（惰性填充；由 MovieLibrary 并行 warm 或首次使用时读取）
         self._frame_count = 0
         self._duration = 0.0
+        self._source_fps = 24.0
         self._fps = 24.0
         self.playback_speed = 1.0
 
         # 播放状态
-        self._queue: queue.Queue = queue.Queue(maxsize=8)
+        self._queue: queue.Queue = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
         self._stop_evt = threading.Event()
         self._thread: threading.Thread | None = None
+        self._threads: set[threading.Thread] = set()
+        self._threads_lock = threading.Lock()
+        self._closed = False
         self._timer = QTimer(self)
         self._timer.setInterval(self._timer_interval())
         self._timer.timeout.connect(self._poll)
@@ -72,7 +82,6 @@ class WebMClip(QObject):
         self._current_image: QImage | None = None
         self._current_pixmap: QPixmap | None = None
         self._first_image: QImage | None = None
-        self._first_pixmap: QPixmap | None = None
         self._frame_index = 0
         self._ended_fired = False
         self._running = False
@@ -84,22 +93,38 @@ class WebMClip(QObject):
         key = str(self.path)
         cached = _META_CACHE.get(key)
         if cached is not None:
-            self._frame_count, self._duration = cached
-            if self._frame_count > 0 and self._duration > 0:
-                self._fps = self._frame_count / self._duration
+            self._source_fps, self._duration = cached
+            self._refresh_render_fps()
             return
+        gen = None
         try:
-            frames, secs = imageio_ffmpeg.count_frames_and_secs(key)
-            if frames and frames > 0:
-                self._frame_count = int(frames)
-            if secs and secs > 0:
-                self._duration = float(secs)
-            if self._frame_count > 0 and self._duration > 0:
-                self._fps = self._frame_count / self._duration
-            _META_CACHE[key] = (self._frame_count, self._duration)
+            # count_frames_and_secs 会让 ffmpeg 扫完整段视频；素材多时启动阶段
+            # CPU/峰值内存都很高。read_frames 的第一项就是流 metadata，拿到即关。
+            gen = imageio_ffmpeg.read_frames(
+                key,
+                pix_fmt='rgba',
+                bits_per_pixel=self._bpp * 8,
+                input_params=['-c:v', 'libvpx-vp9'],
+            )
+            meta = next(gen)
+            fps = float(meta.get('fps') or self._fps or 24.0)
+            duration = float(meta.get('duration') or 0.0)
+            if fps > 0:
+                self._source_fps = fps
+                self._refresh_render_fps()
+            if duration > 0:
+                self._duration = duration
+                self._frame_count = max(1, int(round(duration * self._fps)))
+            _META_CACHE[key] = (self._source_fps, self._duration)
         except Exception as exc:
             logger.warning('webm 元数据读取失败 %s: %s', self.path, exc)
             # 保留默认值，后续 reader 会尝试从 read_frames 的 meta 补充
+        finally:
+            if gen is not None:
+                try:
+                    gen.close()
+                except Exception:
+                    pass
 
     def warm_meta(self) -> None:
         """预取元数据（可被线程池并行调用）。"""
@@ -109,6 +134,14 @@ class WebMClip(QObject):
         if self._fps > 0:
             return max(1, int(round(1000 / (self._fps * self.playback_speed))))
         return max(1, int(round(catalog.FRAME_MS / self.playback_speed)))
+
+    def _refresh_render_fps(self) -> None:
+        # 常速最多 15fps；用户主动加速时逐步放宽到源帧率，避免 2x 播放
+        # 仅靠减少等待而把整段动画播得过快。
+        cap = MAX_RENDER_FPS * max(1.0, self.playback_speed)
+        self._fps = max(1.0, min(float(self._source_fps or 24.0), cap))
+        if self._duration > 0:
+            self._frame_count = max(1, int(round(self._duration * self._fps)))
 
     def frameCount(self) -> int:
         if self._frame_count <= 0:
@@ -133,13 +166,19 @@ class WebMClip(QObject):
 
     # ------------------------------------------------------------ lifecycle
     def set_playback_speed(self, speed: float) -> None:
+        was_running = self._running
+        if was_running:
+            self.stop()
         self.playback_speed = max(0.1, float(speed))
+        self._refresh_render_fps()
         # _switch() 在 movie.start() 之前设置速率，不能只在 QTimer 已启动时更新。
         # 否则每个新 WebM 动画都会继续使用默认的 1x interval。
         self._timer.setInterval(self._timer_interval())
+        if was_running:
+            self.start()
 
     def start(self) -> None:
-        if self._running:
+        if self._running or self._closed:
             return
         if imageio_ffmpeg is None:
             self.errorOccurred.emit(str(_IMPORT_ERROR or 'imageio_ffmpeg 不可用'))
@@ -150,12 +189,14 @@ class WebMClip(QObject):
         self._ensure_meta()
         self._timer.setInterval(self._timer_interval())
         self._stop_evt = threading.Event()
-        self._queue = queue.Queue(maxsize=8)
+        self._queue = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
         self._frame_index = 0
         self._ended_fired = False
         self._running = True
 
         self._thread = threading.Thread(target=self._reader, args=(self._stop_evt,), daemon=True)
+        with self._threads_lock:
+            self._threads.add(self._thread)
         self._thread.start()
         self._timer.start()
 
@@ -164,8 +205,38 @@ class WebMClip(QObject):
         self._timer.stop()
         if self._stop_evt is not None:
             self._stop_evt.set()
+        # 每帧 RGBA 约 0.9MB；旧实现停止后仍让每个
+        # 播放过的 clip 保留整队列，随机动画跑久后会按素材数累积到数百 MB。
+        q = self._queue
+        while True:
+            try:
+                q.get_nowait()
+            except queue.Empty:
+                break
+        self._current_image = None
+        self._current_pixmap = None
         # 不 join：reader 是 daemon 线程，避免切换动画时阻塞 UI 造成卡顿
         self._thread = None
+
+    def close(self, timeout: float = 1.5) -> None:
+        """永久关闭播放器，并在有限时间内回收仍在解码的线程。
+
+        普通动画切换继续使用 ``stop``，不阻塞 UI；只有角色销毁或应用退出
+        才调用本方法。这样既保留切换手感，也不会把 ffmpeg reader 留到
+        Python 解释器退出阶段。
+        """
+        self._closed = True
+        self.stop()
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            with self._threads_lock:
+                threads = [t for t in self._threads if t.is_alive()]
+            if not threads:
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            threads[0].join(min(0.1, remaining))
 
     def jumpToFrame(self, frame_index: int) -> bool:
         # 本项目只需要回到首帧；完整 seek 通过重启 reader + 丢弃帧实现。
@@ -202,7 +273,8 @@ class WebMClip(QObject):
             meta = next(gen)
             frame = next(gen)
             if meta.get('fps'):
-                self._fps = float(meta['fps'])
+                self._source_fps = float(meta['fps'])
+                self._refresh_render_fps()
             if meta.get('duration'):
                 self._duration = float(meta['duration'])
             if self._frame_count <= 0 and self._fps > 0 and self._duration > 0:
@@ -231,7 +303,6 @@ class WebMClip(QObject):
             self._current_image = img
             self._current_pixmap = QPixmap.fromImage(img)
             self._first_image = img
-            self._first_pixmap = self._current_pixmap
 
     def warm_first_frame(self) -> None:
         """后台线程预解码首帧缓存（仅 QImage，线程安全）。
@@ -239,7 +310,7 @@ class WebMClip(QObject):
         首次播放某动画时 jumpToFrame(0) 需要首帧：有缓存则主线程零阻塞，
         避免点击瞬间同步 ffmpeg 解码造成卡顿，以及 Q 弹期间残留旧动画帧。
         """
-        if self._first_image is not None or imageio_ffmpeg is None:
+        if self._closed or self._first_image is not None or imageio_ffmpeg is None:
             return
         img = self._decode_first_qimage()
         if img is not None:
@@ -255,11 +326,13 @@ class WebMClip(QObject):
                 pix_fmt='rgba',
                 bits_per_pixel=self._bpp * 8,
                 input_params=['-c:v', 'libvpx-vp9'],
+                output_params=['-vf', f'fps={self._fps:g}'],
             )
             meta = next(gen)
             # 用实际流信息修正元数据
             if meta.get('fps'):
-                self._fps = float(meta['fps'])
+                self._source_fps = float(meta['fps'])
+                self._refresh_render_fps()
             if meta.get('duration'):
                 self._duration = float(meta['duration'])
             if self._frame_count <= 0 and self._fps > 0 and self._duration > 0:
@@ -298,6 +371,8 @@ class WebMClip(QObject):
                     gen.close()
                 except Exception:
                     pass
+            with self._threads_lock:
+                self._threads.discard(threading.current_thread())
 
     def _poll(self) -> None:
         """主线程按视频帧率逐帧取帧，不跳帧、不积压追帧。
@@ -331,7 +406,9 @@ class WebMClip(QObject):
                      QImage.Format.Format_RGBA8888)
         if img.isNull():
             return
-        self._current_image = img.copy()
-        self._current_pixmap = QPixmap.fromImage(self._current_image)
+        # QPixmap.fromImage 会在 GUI 线程取得自己的像素存储；无需再先 img.copy()
+        # 保留一份同尺寸 QImage。旧路径每帧至少多复制约 0.9MB。
+        self._current_image = None
+        self._current_pixmap = QPixmap.fromImage(img)
         self._frame_index += 1
         self.frameChanged.emit(self._frame_index)

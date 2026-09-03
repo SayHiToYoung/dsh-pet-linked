@@ -8,7 +8,8 @@
   focus 由用户手动「别打扰」开关触发，不由 App 匹配产生；本模块只保留常量。
 
 技术：
-- macOS：`lsappinfo`（LaunchServices 自带，无需辅助功能/Screen Recording 权限）。
+- macOS：`lsappinfo` 取应用身份；经 System Events 尝试读取窗口标题。用户未授予
+  辅助功能权限时自动降级为只有应用身份，不影响时长记录。
 - Windows：`GetForegroundWindow` + `QueryFullProcessImageNameW`（ctypes，零依赖）。
 - 其它平台：回退 idle。
 - 防抖：同一候选持续 `debounce_seconds` 才真正切换，避免 Alt-Tab 快速切换导致闪跳。
@@ -79,6 +80,41 @@ DEFAULT_RULES: dict[str, list[str]] = {
 }
 
 _LSAPPINFO_KEY = re.compile(r'"([^"]+)"="([^"]*)"')
+_MAC_TITLE_CACHE: dict[str, object] = {"at": 0.0, "value": "", "retry_after": 0.0}
+
+
+def _macos_front_window_title() -> str:
+    """尽力读取前台窗口标题；无权限/无窗口时静默返回空串。
+
+    标题最多每 5 秒刷新一次，权限错误后 60 秒再试，避免 2 秒采样循环持续
+    拉起 osascript。System Events 只读取 AXTitle，不读取窗口正文。
+    """
+    now = time.monotonic()
+    cached_at = float(_MAC_TITLE_CACHE.get("at") or 0.0)
+    retry_after = float(_MAC_TITLE_CACHE.get("retry_after") or 0.0)
+    if now < retry_after or now - cached_at < 5.0:
+        return str(_MAC_TITLE_CACHE.get("value") or "")
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/osascript",
+                "-e",
+                'tell application "System Events" to tell first application process whose frontmost is true to get name of front window',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        title = (result.stdout or "").strip() if result.returncode == 0 else ""
+        _MAC_TITLE_CACHE.update({
+            "at": now,
+            "value": title[:500],
+            "retry_after": 0.0 if title else now + 60.0,
+        })
+        return title[:500]
+    except Exception:
+        _MAC_TITLE_CACHE.update({"at": now, "value": "", "retry_after": now + 60.0})
+        return ""
 
 
 def _lower_tokens(rules: dict | None) -> dict[str, list[str]]:
@@ -103,8 +139,8 @@ def _extract_lsappinfo(text: str, key: str) -> str:
     return ""
 
 
-def _macos_foreground() -> dict:
-    """lsappinfo：前台应用的 ASN → 显示名 + bundle id。无需特殊权限。"""
+def _macos_foreground(include_title: bool = True) -> dict:
+    """lsappinfo：前台应用 ASN → 显示名 + bundle id；标题失败时安全降级。"""
     try:
         front = subprocess.run(
             ["lsappinfo", "front"], capture_output=True, text=True, timeout=2.0
@@ -119,7 +155,8 @@ def _macos_foreground() -> dict:
         out = info.stdout or ""
         name = _extract_lsappinfo(out, "LSDisplayName") or _extract_lsappinfo(out, "name")
         bundle = _extract_lsappinfo(out, "CFBundleIdentifier") or _extract_lsappinfo(out, "bundleID")
-        return {"name": name, "bundle": bundle, "title": "", "platform": "darwin"}
+        title = _macos_front_window_title() if include_title else ""
+        return {"name": name, "bundle": bundle, "title": title, "platform": "darwin"}
     except Exception:
         log.debug("macOS 前台应用探测失败", exc_info=True)
         return {}
@@ -160,10 +197,10 @@ def _windows_foreground() -> dict:
         return {}
 
 
-def detect_foreground_app() -> dict:
+def detect_foreground_app(include_title: bool = True) -> dict:
     """返回前台应用身份：{name, bundle, title, platform}；拿不到返回空 dict。"""
     if sys.platform == "darwin":
-        return _macos_foreground()
+        return _macos_foreground(include_title=include_title)
     if sys.platform == "win32":
         return _windows_foreground()
     return {}  # Linux 等回退 idle
@@ -306,6 +343,9 @@ class ContextAwareMonitor:
         with self._lock:
             if context == self._current:
                 # 回到当前情境（或一直没变）：清候选，保持稳定
+                # 情境没变不代表窗口没变：同一个 IDE 内切项目、浏览器切标签
+                # 仍要刷新最新 app/title，供活动记忆按事实分段。
+                self._current_app = app
                 self._candidate = IDLE
                 self._candidate_app = {}
                 self._candidate_since = None

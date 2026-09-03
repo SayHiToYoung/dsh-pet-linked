@@ -70,6 +70,11 @@ def build_modern_menu(menu: QMenu, pet, template: dict) -> None:
 
     # 陪伴：她如何感知并回应当前用户。
     companion = add_submenu(menu, "陪伴与感知", "screen")
+    # 只接受窗口显式注入的能力；某些兼容对象用 __getattr__ 动态兜底，
+    # 不能因此误显示一个实际不存在的入口。
+    memory_report = getattr(pet, "__dict__", {}).get("on_memory_report")
+    if memory_report is not None:
+        add_action(companion, "让小鲸整理今天", "chat", memory_report, close_on_trigger=True)
     add_look_screen(companion, pet)
     # 主动识屏（上游移植）：仅 Windows + 有聊天能力时挂载。
     if sys.platform == "win32" and getattr(pet, "proactive_watcher", None) is not None:

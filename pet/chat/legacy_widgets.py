@@ -856,7 +856,12 @@ class ChatWindow(QDialog):
         if not text:
             return
         self.input.clear()
-        self.session.messages.append(ChatMessage("user", text))
+        message = ChatMessage("user", text)
+        self.session.messages.append(message)
+        pet = self.pet_link.pet_window
+        callback = getattr(pet, "on_user_chat_message", None)
+        if callable(callback):
+            callback(text, message.message_id)
         self._add("user", text)
         self._last_user_text = text
         self._begin_generation(text)

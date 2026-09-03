@@ -1,0 +1,18 @@
+{
+  "name": "大鲸",
+  "short_name": "大鲸",
+  "description": "读取小鲸送来的共享记忆，在你有空时陪你聊聊。",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#eaf3fb",
+  "theme_color": "#256e9e",
+  "icons": [
+    {
+      "src": "/media/ojingjing.jpg",
+      "sizes": "1254x1254",
+      "type": "image/jpeg",
+      "purpose": "any"
+    }
+  ]
+}

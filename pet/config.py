@@ -423,6 +423,18 @@ class Config:
             "context_rules": {},              # 用户覆盖规则：{meeting/gaming/work: [关键词...]}；空=内置默认
             "meeting_care_enabled": True,     # 会议关怀总开关（按开会时长分档反馈）
             "meeting_care_thresholds": [],    # 会议关怀档位（分钟）：[30,60,120]；空=内置默认
+            "memory_collection_enabled": True,       # 桌面活动记忆总开关
+            "memory_collect_window_titles": True,    # macOS 需辅助功能权限；无权限自动降级
+            "memory_idle_seconds": 180,              # 键鼠空闲多久后停止累计前台应用
+            "memory_min_segment_seconds": 20,        # 过滤 Alt-Tab 等短暂活动
+            "memory_project_roots": [],              # 可选项目根目录；只在这些目录读取 README
+            "memory_workday_end": "18:00",          # 当日可见“记下啦”提示时间
+            "memory_sync_enabled": False,            # 默认只落本地；明确开启后才向服务端同步
+            "memory_sync_url": "http://127.0.0.1:47821",
+            "memory_sync_token": "local-dev-token", # 本地模拟服务配对口令；正式远端必须 HTTPS
+            "memory_sync_user_id": "local-user",    # MVP 单用户标识
+            "memory_sync_device_id": "",            # 首次同步自动生成并持久化
+            "memory_sync_interval_seconds": 30,
             "proactive_screen": _default_proactive_screen_data(),  # 主动识屏（上游移植）
             "agent_link": _default_agent_link_data(),             # 多 Agent 联动（上游移植）
         }
@@ -501,6 +513,12 @@ class Config:
             "proactive_care_enabled", "proactive_care_thresholds",
             "context_aware_enabled", "context_focus_enabled", "context_rules",
             "meeting_care_enabled", "meeting_care_thresholds",
+            "memory_collection_enabled", "memory_collect_window_titles",
+            "memory_idle_seconds", "memory_min_segment_seconds",
+            "memory_project_roots", "memory_workday_end",
+            "memory_sync_enabled", "memory_sync_url", "memory_sync_token",
+            "memory_sync_user_id", "memory_sync_device_id",
+            "memory_sync_interval_seconds",
         ):
             if key in raw and raw[key] is not None:
                 self.data[key] = raw[key]

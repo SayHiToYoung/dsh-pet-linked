@@ -188,6 +188,8 @@ class PetWindow(QWidget):
         self.on_open_modern_settings = None
         self.on_restore_fun_windows = None
         self.on_spawn_pet = None
+        self.on_memory_report = None
+        self.on_user_chat_message = None
         self.on_hidden = None  # 由 app 注入：用户主动隐藏时弹托盘提示
         self.on_dropped = None  # 由 app 注入：拖拽松手 → 判断是否拖进了办公区(搬回)
         self.on_drag_move = None  # 由 app 注入：拖拽移动 → 上报位置(办公区 ghost 实时预览)
@@ -311,6 +313,8 @@ class PetWindow(QWidget):
         self.no_move: bool = bool(config.get('no_move', False))  # 不移动：禁用自动移动
         self.movie = None
         self._frame_pixmap: QPixmap | None = None
+        self._last_mask_sync: float = 0.0
+        self._mask_sync_interval: float = 0.10  # 命中区域 10fps 足够，画面仍按原帧率播放
         self._ended_fired = False
 
         # ---- 交互状态 ----
@@ -394,6 +398,7 @@ class PetWindow(QWidget):
         self.scale = scale
         self._apply_scale()
         self.move(self.x(), old_bottom - self._h + 1)
+        self._last_mask_sync = 0.0
         self._rebuild_frame()
         if self._speech_bubble.isVisible():
             self._speech_bubble.reflow(
@@ -639,36 +644,49 @@ class PetWindow(QWidget):
             self._on_anim_ended(name)
 
     def _rebuild_frame(self) -> None:
-        """重建当前帧：缩放 + 朝向镜像 + 生成窗口 mask。"""
+        """接住当前原始帧；缩放/镜像交给绘制阶段，避免每帧多次大图复制。"""
         if self.movie is None:
             return
         pm = self.movie.currentPixmap()
-        if pm.isNull():
+        if pm is None or pm.isNull():
             return
-        img = pm.toImage()
-        if self.facing == 'right':
-            img = img.mirrored(True, False)
-        # 按屏幕 DPR 渲染到物理像素，避免高分屏下被 Qt 二次放大导致模糊
-        scr = self._screen_available()
-        dpr = scr.devicePixelRatio() if scr is not None else 1.0
-        w_c = max(1, int(round(catalog.CANVAS_W * self.scale * dpr)))
-        h_c = max(1, int(round(catalog.CANVAS_H * self.scale * dpr)))
-        img = img.scaled(w_c, h_c,
-                         Qt.AspectRatioMode.IgnoreAspectRatio,
-                         Qt.TransformationMode.SmoothTransformation)
-        pm = QPixmap.fromImage(img)
-        pm.setDevicePixelRatio(dpr)
         self._frame_pixmap = pm
         self._sync_mask()
 
-    def _sync_mask(self) -> None:
+    def _draw_frame(self, painter: QPainter, x: int, y: int, width: int, height: int) -> None:
+        if self._frame_pixmap is None or self._frame_pixmap.isNull():
+            return
+        painter.save()
+        if self.facing == 'right':
+            painter.translate(x + width, y)
+            painter.scale(-1.0, 1.0)
+            painter.drawPixmap(0, 0, width, height, self._frame_pixmap)
+        else:
+            painter.drawPixmap(x, y, width, height, self._frame_pixmap)
+        painter.restore()
+
+    def _sync_mask(self, force: bool = False) -> None:
         """按当前帧 alpha 设置窗口 mask：透明区域鼠标穿透到下层窗口。"""
+        try:
+            from PySide6.QtGui import QGuiApplication
+            if QGuiApplication.platformName() in ("offscreen", "minimal"):
+                return
+        except Exception:
+            pass
+        now = time.monotonic()
+        if not force and now - self._last_mask_sync < self._mask_sync_interval:
+            return
+        self._last_mask_sync = now
         canvas = QImage(self._w, self._h, QImage.Format.Format_ARGB32)
         canvas.fill(Qt.GlobalColor.transparent)
         p = QPainter(canvas)
-        p.translate(0, int(round(catalog.PAD * self.scale)))
-        if self._frame_pixmap is not None:
-            p.drawPixmap(0, 0, self._frame_pixmap)
+        self._draw_frame(
+            p,
+            0,
+            int(round(catalog.PAD * self.scale)),
+            int(round(catalog.CANVAS_W * self.scale)),
+            int(round(catalog.CANVAS_H * self.scale)),
+        )
         p.end()
         self.setMask(QBitmap.fromImage(canvas.createAlphaMask()))
 
@@ -685,11 +703,16 @@ class PetWindow(QWidget):
                     int(round(catalog.CANVAS_H * self.scale)),
                     self._squash_progress,
                 )
-                painter.drawPixmap(x, y, w, h, self._frame_pixmap)
+                self._draw_frame(painter, x, y, w, h)
             else:
                 # 落地对齐：整帧下移 PAD×scale，让人物脚底踩在窗口底线
-                painter.translate(0, int(round(catalog.PAD * self.scale)))
-                painter.drawPixmap(0, 0, self._frame_pixmap)
+                self._draw_frame(
+                    painter,
+                    0,
+                    int(round(catalog.PAD * self.scale)),
+                    int(round(catalog.CANVAS_W * self.scale)),
+                    int(round(catalog.CANVAS_H * self.scale)),
+                )
         painter.end()
 
     def _start_squash(self) -> None:
@@ -2000,7 +2023,15 @@ class PetWindow(QWidget):
         self._self_talk_timer.stop()
         self._cancel_animation_gap()
         self._speech_bubble.hide()
+        self.shutdown_media()
         super().closeEvent(event)
+
+    def shutdown_media(self) -> None:
+        """停止当前角色的动画预热和解码线程；可重复调用。"""
+        try:
+            self.lib.close()
+        except Exception:
+            logging.exception("桌宠动画资源关闭失败")
 
     # ================================================================ 主动识屏 / Agent 联动开关（上游移植）
     def _toggle_proactive_enabled(self, on: bool) -> None:

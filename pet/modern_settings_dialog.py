@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 from pathlib import Path
@@ -1114,6 +1115,17 @@ class ModernSettingsDialog(QDialog):
             SettingRow("meeting_care_level2", "第二档", "开会达到该时长，散会后触发第二档关怀。", self.meeting_care_level2),
             SettingRow("meeting_care_level3", "第三档", "开会达到该时长，散会后触发第三档关怀。", self.meeting_care_level3),
         ], context_content))
+        context_layout.addWidget(SettingsSection("日常记忆", [
+            SettingRow("memory_collection", "记录日常活动", "把前台应用、连续时长和会议整理为本地事实记忆；不保存屏幕截图。", self.memory_collection_check),
+            SettingRow("memory_titles", "读取窗口标题", "用于识别项目、游戏和影视名称；macOS 未授权辅助功能时自动降级为只记录应用。", self.memory_titles_check),
+            SettingRow("memory_idle", "停止累计空闲时间", "键鼠无操作超过该时长后，不再把离开电脑的时间算进前台应用。", self.memory_idle_spin),
+            SettingRow("memory_min_segment", "忽略短暂切换", "短于该时长的窗口切换不形成记忆，减少 Alt-Tab 噪音。", self.memory_min_segment_spin),
+            SettingRow("memory_workday_end", "下班提示时间", "到这个时间后，小鲸每天最多提示一次「今天的我记下啦」。", self.memory_workday_end_edit),
+            SettingRow("memory_project_roots", "项目目录", "每行一个已知项目根目录；只在这些目录内读取 README 简介，不读取代码正文。", self.memory_project_roots_edit, stacked=True),
+            SettingRow("memory_sync", "同步给大鲸", "实验功能：把本地增量记忆发送到配对的共享记忆服务；关闭时绝不上传。", self.memory_sync_check),
+            SettingRow("memory_sync_url", "记忆服务地址", "本机模拟器可用 http://127.0.0.1；远程地址必须使用 HTTPS。", self.memory_sync_url_edit),
+            SettingRow("memory_sync_token", "配对口令", "小鲸与大鲸服务共享的访问口令。当前 MVP 保存在本机配置中。", self.memory_sync_token_edit),
+        ], context_content))
         context_layout.addStretch(1)
         self._add_page("陪伴", "情境感知", "screen", self._page_shell("情境感知", context_content))
 
@@ -1226,6 +1238,7 @@ class ModernSettingsDialog(QDialog):
         self._update_click_sound_controls(self.click_sound_check.isChecked())
         self._update_context_controls(self.context_aware_check.isChecked())
         self._update_meeting_care_controls(self.meeting_care_check.isChecked())
+        self._update_memory_controls(self.memory_collection_check.isChecked())
 
         self.setStyleSheet(self._stylesheet())
 
@@ -1454,6 +1467,41 @@ class ModernSettingsDialog(QDialog):
             spin.setValue(float(value))
         self.meeting_care_check.toggled.connect(self._update_meeting_care_controls)
 
+        # 日常活动记忆（与情境行为开关独立：即使桌宠不自动躲起，也可继续记时长）
+        self.memory_collection_check = ToggleSwitch(self)
+        self.memory_collection_check.setChecked(bool(self.config.get("memory_collection_enabled", True)))
+        self.memory_titles_check = ToggleSwitch(self)
+        self.memory_titles_check.setChecked(bool(self.config.get("memory_collect_window_titles", True)))
+        self.memory_idle_spin = BrowserDoubleSpinBox(self)
+        self.memory_idle_spin.setRange(0.5, 120.0)
+        self.memory_idle_spin.setDecimals(1)
+        self.memory_idle_spin.setSuffix(" 分钟")
+        self.memory_idle_spin.setValue(float(self.config.get("memory_idle_seconds", 180) or 180) / 60.0)
+        self.memory_min_segment_spin = BrowserSpinBox(self)
+        self.memory_min_segment_spin.setRange(5, 300)
+        self.memory_min_segment_spin.setSuffix(" 秒")
+        self.memory_min_segment_spin.setValue(int(self.config.get("memory_min_segment_seconds", 20) or 20))
+        self.memory_workday_end_edit = QLineEdit(str(self.config.get("memory_workday_end", "18:00") or "18:00"), self)
+        self.memory_workday_end_edit.setMaximumWidth(100)
+        roots = self.config.get("memory_project_roots") or []
+        roots = roots if isinstance(roots, list) else []
+        self.memory_project_roots_edit = QPlainTextEdit(self)
+        self.memory_project_roots_edit.setMinimumSize(240, 72)
+        self.memory_project_roots_edit.setMaximumHeight(130)
+        self.memory_project_roots_edit.setPlainText("\n".join(str(root) for root in roots))
+        self.memory_collection_check.toggled.connect(self._update_memory_controls)
+        self.memory_sync_check = ToggleSwitch(self)
+        self.memory_sync_check.setChecked(bool(self.config.get("memory_sync_enabled", False)))
+        self.memory_sync_url_edit = _line_edit(
+            str(self.config.get("memory_sync_url", "http://127.0.0.1:47821") or ""), width=280
+        )
+        self.memory_sync_token_edit = _line_edit(
+            str(self.config.get("memory_sync_token", "local-dev-token") or ""),
+            password=True,
+            width=220,
+        )
+        self.memory_sync_check.toggled.connect(self._update_memory_sync_controls)
+
         # ---- 主动识屏（上游 proactive.py 移植；仅 Windows + 有聊天能力时挂载）----
         self._pro_built = False
         self.pro_enabled_check = None
@@ -1510,6 +1558,35 @@ class ModernSettingsDialog(QDialog):
             row = self.findChild(SettingRow, f"settingRow_{key}")
             if row is not None:
                 row.setEnabled(bool(enabled))
+
+    def _update_memory_controls(self, enabled: bool) -> None:
+        for key, control in (
+            ("memory_titles", self.memory_titles_check),
+            ("memory_idle", self.memory_idle_spin),
+            ("memory_min_segment", self.memory_min_segment_spin),
+            ("memory_workday_end", self.memory_workday_end_edit),
+            ("memory_project_roots", self.memory_project_roots_edit),
+        ):
+            control.setEnabled(bool(enabled))
+            row = self.findChild(SettingRow, f"settingRow_{key}")
+            if row is not None:
+                row.setEnabled(bool(enabled))
+        self.memory_sync_check.setEnabled(bool(enabled))
+        sync_row = self.findChild(SettingRow, "settingRow_memory_sync")
+        if sync_row is not None:
+            sync_row.setEnabled(bool(enabled))
+        self._update_memory_sync_controls(bool(enabled) and self.memory_sync_check.isChecked())
+
+    def _update_memory_sync_controls(self, enabled: bool) -> None:
+        active = bool(enabled) and self.memory_collection_check.isChecked()
+        for key, control in (
+            ("memory_sync_url", self.memory_sync_url_edit),
+            ("memory_sync_token", self.memory_sync_token_edit),
+        ):
+            control.setEnabled(active)
+            row = self.findChild(SettingRow, f"settingRow_{key}")
+            if row is not None:
+                row.setEnabled(active)
 
     def _update_agent_sound_controls(self, enabled: bool) -> None:
         """Agent 音效音量随总开关联动。"""
@@ -2135,6 +2212,24 @@ class ModernSettingsDialog(QDialog):
         })
         self.config.set("meeting_care_enabled", self.meeting_care_check.isChecked())
         self.config.set("meeting_care_thresholds", self._meeting_care_thresholds())
+        self.config.set("memory_collection_enabled", self.memory_collection_check.isChecked())
+        self.config.set("memory_collect_window_titles", self.memory_titles_check.isChecked())
+        self.config.set("memory_idle_seconds", int(round(self.memory_idle_spin.value() * 60)))
+        self.config.set("memory_min_segment_seconds", int(self.memory_min_segment_spin.value()))
+        workday_end = self.memory_workday_end_edit.text().strip()
+        if not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", workday_end):
+            workday_end = "18:00"
+        self.config.set("memory_workday_end", workday_end)
+        self.config.set("memory_project_roots", [
+            line.strip() for line in self.memory_project_roots_edit.toPlainText().splitlines()
+            if line.strip()
+        ])
+        sync_url = self.memory_sync_url_edit.text().strip().rstrip("/")
+        if not sync_url:
+            sync_url = "http://127.0.0.1:47821"
+        self.config.set("memory_sync_enabled", self.memory_sync_check.isChecked())
+        self.config.set("memory_sync_url", sync_url)
+        self.config.set("memory_sync_token", self.memory_sync_token_edit.text())
         # 主动识屏（上游移植）：仅在 Windows 挂载控件时落盘；合并写回保留未暴露键
         if getattr(self, "_pro_built", False):
             from .proactive import PRESET_DEFAULTS

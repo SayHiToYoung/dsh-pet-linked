@@ -18,8 +18,10 @@ GifClip 基于 QMovie 播放透明 GIF（兼容旧 GIF 路线）。
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+import atexit
 import threading
+import time
+import weakref
 from pathlib import Path
 from typing import Mapping
 
@@ -32,6 +34,19 @@ from .webm_clip import WebMClip
 
 # QMovie 播放速度补偿（%）：GIF 路线使用，校准 QMovie 偏慢问题
 PLAYBACK_SPEED = 120
+PREWARM_CLIP_LIMIT = 4
+_LIVE_LIBRARIES: "weakref.WeakSet[MovieLibrary]" = weakref.WeakSet()
+
+
+def _close_live_libraries() -> None:
+    for library in list(_LIVE_LIBRARIES):
+        try:
+            library.close(timeout=1.0)
+        except Exception:
+            pass
+
+
+atexit.register(_close_live_libraries)
 
 
 class GifClip(QObject):
@@ -129,6 +144,10 @@ class MovieLibrary(QObject):
         self._movies: dict[str, object] = {}
         self.media_type: str = 'webm'
         self.no_mirror: set[str] = self._load_no_mirror()
+        self._warm_stop = threading.Event()
+        self._warm_thread: threading.Thread | None = None
+        self._closed = False
+        _LIVE_LIBRARIES.add(self)
 
         self._load_all()
 
@@ -194,24 +213,52 @@ class MovieLibrary(QObject):
 
         # 后台并行预热元数据，不阻塞启动/切角色
         if self._movies:
-            threading.Thread(target=self._warm_all_meta_background, daemon=True).start()
+            self._warm_thread = threading.Thread(
+                target=self._warm_all_meta_background,
+                daemon=True,
+                name=f"pet-media-warm-{self.character_id}",
+            )
+            self._warm_thread.start()
 
     def _warm_all_meta_background(self) -> None:
         try:
-            # 并发控制在 3：每个 webm 首帧预热都会拉起一个 ffmpeg 子进程，
-            # 并发过高会形成进程洪峰，提高杀毒软件拦截/误报概率。
-            workers = min(3, len(self._movies))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                list(ex.map(lambda clip: clip.warm_meta(), list(self._movies.values())))
-                # 预解码各动画首帧（QImage 线程安全），首次播放时零阻塞切换，
-                # 避免点击 Q 弹瞬间同步 ffmpeg 解码造成卡顿与旧动画帧残留。
-                list(ex.map(
-                    lambda clip: getattr(clip, 'warm_first_frame', lambda: None)(),
-                    list(self._movies.values()),
-                ))
+            # 单线程顺序预热：每个 webm 都会拉起 ffmpeg 子进程。并行 executor
+            # 的 worker 是非 daemon 线程，会在应用退出时抢在 Qt 清理前继续派生
+            # 子进程；顺序预热更适合需要常驻且可随时退出的桌宠。
+            # 只预热启动阶段最可能用到的一小批。旧实现会为全部素材逐个拉起
+            # ffmpeg；角色切换或退出时，几十个解码任务可能仍留在后台。
+            clips = list(self._movies.values())[:PREWARM_CLIP_LIMIT]
+            if not clips or self._warm_stop.is_set():
+                return
+            for clip in clips:
+                if self._warm_stop.is_set():
+                    break
+                # warm_first_frame 同时会从流头取得 fps/duration，无需先调用
+                # count_frames_and_secs 把整段视频再扫一遍。
+                getattr(clip, 'warm_first_frame', lambda: None)()
         except Exception:
             # 预热失败不致命，后续按需读取时会再尝试
             pass
+
+    def close(self, timeout: float = 2.0) -> None:
+        """停止预热与所有播放器；可重复调用。"""
+        if self._closed:
+            return
+        self._closed = True
+        self._warm_stop.set()
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        for clip in self._movies.values():
+            closer = getattr(clip, 'close', None)
+            if callable(closer):
+                remaining = max(0.0, deadline - time.monotonic())
+                closer(timeout=min(0.35, remaining))
+            else:
+                getattr(clip, 'stop', lambda: None)()
+        thread = self._warm_thread
+        if thread is not None and thread.is_alive():
+            thread.join(max(0.0, deadline - time.monotonic()))
+        self._warm_thread = None
+        _LIVE_LIBRARIES.discard(self)
 
     def movie(self, name: str):
         return self._movies[name]

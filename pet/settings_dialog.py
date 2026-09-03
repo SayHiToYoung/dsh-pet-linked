@@ -155,13 +155,13 @@ class PetSettingsDialog(QDialog):
         # 开机自启立即生效（写注册表/LaunchAgent plist），记录期望状态供启动自检
         autostart_ok = autostart_mod.set_enabled(self.autostart_check.isChecked())
         self.config.set("autostart_wanted", self.autostart_check.isChecked())
-        if not autostart_ok:
+        if not autostart_ok and self.isVisible():
             QMessageBox.warning(
                 self, "开机自启",
                 "写入开机自启失败：可能被安全软件拦截。\n"
                 "可稍后在托盘菜单重试，或检查安全软件/系统优化工具的拦截记录。",
             )
-        elif self.autostart_check.isChecked() and sys.platform == "darwin":
+        elif self.isVisible() and self.autostart_check.isChecked() and sys.platform == "darwin":
             QMessageBox.information(
                 self, "开机自启",
                 "已开启开机自启；如重启未生效，请到\n"

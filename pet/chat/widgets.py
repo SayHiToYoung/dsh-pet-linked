@@ -1685,7 +1685,12 @@ class ChatWindow(QDialog):
             request_text += "\n\n" + attachment_context
         self.input.clear()
         self.composer.clear_attachments()
-        self.session.messages.append(ChatMessage("user", display_text))
+        message = ChatMessage("user", display_text)
+        self.session.messages.append(message)
+        pet = self.pet_link.pet_window
+        callback = getattr(pet, "on_user_chat_message", None)
+        if callable(callback):
+            callback(text or display_text, message.message_id)
         self._add("user", display_text)
         self._last_user_text = request_text
         self._begin_generation(request_text, image_payloads=image_payloads)

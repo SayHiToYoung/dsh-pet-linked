@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#eaf3fb" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0c1722" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="大鲸">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/media/ojingjing.jpg">
+  <link rel="stylesheet" href="/styles.css?v=4">
+  <title>大鲸</title>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="greeting" id="greeting">晚上好</p>
+        <h1>大鲸</h1>
+      </div>
+      <button class="text-button" id="open-settings" type="button">设置</button>
+    </header>
+
+    <main>
+      <section class="presence" aria-labelledby="presence-title">
+        <img src="/media/whale-v2.jpg" alt="站在鲸群与海浪之间的大鲸" width="1600" height="900">
+        <div class="presence-shade"></div>
+        <div class="presence-copy">
+          <p id="presence-title">她记得白天发生的事</p>
+          <div class="handoff-line" id="handoff-line">
+            <span class="connection-dot" aria-hidden="true"></span>
+            <span id="handoff-text">正在等小鲸的报信</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="memory-receipt" id="memory-receipt" hidden aria-live="polite">
+        <p class="receipt-label">小鲸看到的</p>
+        <p class="receipt-text" id="receipt-text"></p>
+      </section>
+
+      <section class="conversation" id="conversation" aria-label="和大鲸的对话" aria-live="polite">
+        <div class="loading-state" id="loading-state" aria-label="正在读取共享记忆">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="empty-state" id="empty-state" hidden>
+          <p>这里还很安静。</p>
+          <span>等小鲸送来新的记忆，大鲸才会先开口。</span>
+        </div>
+      </section>
+    </main>
+
+    <div class="inline-status" id="inline-status" role="status" hidden></div>
+
+    <form class="composer" id="composer">
+      <label class="sr-only" for="message-input">想对大鲸说的话</label>
+      <textarea id="message-input" rows="1" maxlength="4000" placeholder="想和她说点什么"></textarea>
+      <button id="send-button" type="submit">发送</button>
+    </form>
+  </div>
+
+  <dialog id="settings-dialog" class="settings-dialog">
+    <form method="dialog" class="settings-panel" id="settings-form">
+      <div class="settings-heading">
+        <div>
+          <p>连接设置</p>
+          <h2>同一份记忆</h2>
+        </div>
+        <button class="text-button" value="cancel" type="submit">关闭</button>
+      </div>
+
+      <label class="field">
+        <span>记忆服务地址</span>
+        <input id="service-url" type="url" inputmode="url" autocomplete="url" required>
+        <small>和当前页面同源时不需要修改。</small>
+      </label>
+
+      <label class="field">
+        <span>配对口令</span>
+        <input id="pairing-token" type="password" autocomplete="current-password" required>
+        <small>需要与小鲸桌宠中的口令一致。</small>
+      </label>
+
+      <label class="field">
+        <span>用户标识</span>
+        <input id="user-id" type="text" autocomplete="username" maxlength="128" required>
+      </label>
+
+      <p class="settings-error" id="settings-error" hidden></p>
+      <p class="model-status" id="model-status" role="status">正在检查大鲸的对话模型</p>
+      <button class="primary-button" id="save-settings" value="default" type="button">保存连接</button>
+      <p class="install-note">在手机浏览器的分享菜单里选择“添加到主屏幕”，就能像应用一样打开。</p>
+    </form>
+  </dialog>
+
+  <template id="message-template">
+    <article class="message">
+      <p class="message-author"></p>
+      <p class="message-text"></p>
+      <time></time>
+    </article>
+  </template>
+
+  <script src="/app.js?v=5" defer></script>
+</body>
+</html>
