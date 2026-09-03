@@ -39,13 +39,21 @@ class CompanionState:
         self,
         *,
         pet_id: str = DEFAULT_PET_ID,
-        lease_timeout: float = 8.0,
+        lease_timeout: float = 45.0,
         handoff_timeout: float = 5.0,
         clock: Callable[[], float] | None = None,
         instance_id: str | None = None,
     ) -> None:
         self.pet_id = str(pet_id or DEFAULT_PET_ID)
         self.instance_id = str(instance_id or uuid.uuid4().hex)
+        # 租约超时 = 「多久没听到连接器的心跳就把她收回桌面」。
+        # 事故(2026-09-03):原值 8s。Office 的心跳挂在渲染进程的 setTimeout 链上,
+        # Electron 窗口进后台会把它压到分钟级 → 8 秒必然过期 → 桌宠单方面收回,
+        # 而 Office 那边她还画着 → 桌面和办公区各一只。
+        # 两件事一起改才治得住:
+        #   · 这里把窗口拉长到 45s,让「一次后台/一次卡顿」不再等于「连接器没了」;
+        #   · Office 侧在面板不可见时【主动】把她交给桌宠(见 office.js syncPanelVisibility),
+        #     所以正常情况下根本走不到这条超时。这条只剩「Office 面板被关掉」的兜底。
         self.lease_timeout = max(1.0, float(lease_timeout))
         # 现有最远距离交接动画可接近 3 秒，给动画和一次事件循环回调留足余量。
         self.handoff_timeout = max(3.0, float(handoff_timeout))
@@ -121,6 +129,7 @@ class CompanionState:
             "handoffId": self._handoff_id,
             "handoffTarget": self._handoff_target if self._transition != STABLE else "",
             "leaseExpiresInMs": int(round(lease_remaining * 1000)),
+            "leaseTimeoutMs": int(round(self.lease_timeout * 1000)),
             "reason": self._last_reason,
         }
 
