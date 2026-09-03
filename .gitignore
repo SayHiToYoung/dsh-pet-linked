@@ -66,3 +66,15 @@ packaging/build_variant.py
 
 # 全局忽略 macOS 元数据（置于所有白名单之后，防止被 !** 反向放行）
 **/.DS_Store
+
+# —— 活动记忆的运行时产物:绝不进仓库 ——
+# 方向文档第 5 节:「行为日志按敏感数据对待」。activity_memory 会写下前台应用、
+# 窗口标题与时长,memory_server 会落 SQLite —— 这是「你一整天在电脑上干了什么」。
+# 现在这些数据碰巧落在仓库外,但那是运气不是拦截:一次 `git add -A` 就够把它写进
+# 公开仓库的历史,而 git 历史里的这类东西最难擦干净。规则要写在这里,不能只写在文档里。
+*.db
+*.sqlite
+*.sqlite3
+*.jsonl
+memory_store/
+.memory/
